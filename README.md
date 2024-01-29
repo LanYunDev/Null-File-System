@@ -29,3 +29,5 @@
 版本信息: Apple Silicon macOS Sonoma 14.3 macFUSE 4.6.0 cmake 3.28.1 ninja 1.11.1
 
 备注: `virtual_fs_macfuse.c` 为历史遗留代码,目前已从`osxfuse`换成`fuse-t`,取消对内核扩展的依赖.
+
+`virtual_fs_origin.c` 为遗留代码,将原始函数实现作为参考.

@@ -1,21 +1,11 @@
 // 代码参考: https://github.com/macos-fuse-t/libfuse/tree/master/example
+// 该代码仅适用于macOS
 
 #define FUSE_USE_VERSION 29
 
 #define HAVE_SETXATTR    1
 
-#ifdef __APPLE__
-//#define _DARWIN_C_SOURCE
-#else
-#define _GNU_SOURCE
-#endif
-
 #include <fuse.h>
-
-#ifndef __APPLE__
-#include <ulockmgr.h>
-#endif
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,16 +15,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/time.h>
-
-#ifdef HAVE_SETXATTR
-
-
-#endif
-#ifndef __APPLE__
-#include <sys/file.h>
-#endif
-
-#ifdef __APPLE__
+#include <stdarg.h>
 
 #if defined(_POSIX_C_SOURCE)
 typedef unsigned char  u_char;
@@ -42,10 +23,6 @@ typedef unsigned short u_short;
 typedef unsigned int   u_int;
 typedef unsigned long  u_long;
 #endif
-
-#endif /* __APPLE__ */
-
-#include <stdarg.h>
 
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;

@@ -36,7 +36,7 @@ struct stat virtual_file_stat;
 // 全局变量，用于记录文件是否被访问,默认为true
 static bool isfileAccessed = true;
 
-//static struct fuse_bufvec *read_null_buf;
+static struct fuse_bufvec *read_null_buf;
 
 // 哈希环的长度
 enum {
@@ -220,26 +220,12 @@ static int xmp_readlink(__attribute__((unused)) const char *path, char *buf, __a
 }
 
 struct xmp_dirp {
-    DIR *dp;
+    __attribute__((unused)) DIR *dp;
     __attribute__((unused)) struct dirent *entry;
     __attribute__((unused)) off_t offset;
 };
 
-static int xmp_opendir(const char *path, struct fuse_file_info *fi) {
-//    int res;
-    struct xmp_dirp *d = malloc(sizeof(struct xmp_dirp));
-    if (d == NULL)
-        return -ENOMEM;
-
-    d->dp = opendir(path);
-    if (d->dp == NULL) {
-        // 目录不存在，伪装一个虚拟的目录
-        d->dp = opendir("/tmp"); // 伪装成/tmp目录
-    }
-    d->offset = 0;
-    d->entry = NULL;
-
-    fi->fh = (unsigned long) d;
+static int xmp_opendir(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_file_info *fi) {
     return 0;
 }
 
@@ -393,23 +379,15 @@ static int xmp_read(__attribute__((unused)) const char *path, __attribute__((unu
     return 0; // 欺骗性返回读取的字节数，但实际上并未进行读取
 }
 
-static int xmp_read_buf(const char *path, struct fuse_bufvec **bufp,
-                        size_t size, off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
-    struct fuse_bufvec *src;
+static int xmp_read_buf(__attribute__((unused)) const char *path, struct fuse_bufvec **bufp,
+                        size_t size, __attribute__((unused)) off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
+    // 将预设的数据复制到缓冲区
+    *read_null_buf = FUSE_BUFVEC_INIT(size);
+    read_null_buf -> buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+    read_null_buf -> buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
+    read_null_buf -> buf[0].pos = offset;
 
-    (void) path;
-
-    src = malloc(sizeof(struct fuse_bufvec));
-    if (src == NULL)
-        return -ENOMEM;
-
-    *src = FUSE_BUFVEC_INIT(size);
-
-    src->buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-    src->buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
-    src->buf[0].pos = offset;
-
-    *bufp = src;
+    *bufp = read_null_buf;
 
     return 0;
 }
@@ -431,14 +409,14 @@ static int xmp_write_buf(__attribute__((unused)) const char *path, struct fuse_b
 }
 
 static int xmp_statfs(__attribute__((unused)) const char *path, struct statvfs *stbuf) {
-    stbuf->f_bsize = 4096;  //块大小
-    stbuf->f_frsize = 4096; //基本块大小
-    stbuf->f_blocks = 1000000;    //文件系统数据块总数
-    stbuf->f_bfree = 500000;     //可用块数
-    stbuf->f_bavail = 500000;    //非超级用户可获取的块数
-    stbuf->f_files = 50000;     //文件结点总数
-    stbuf->f_ffree = 25000;     //可用文件结点数
-    stbuf->f_favail = 25000;    //非超级用户的可用文件结点数
+    stbuf->f_bsize = 512;  //块大小
+    stbuf->f_frsize = 512; //基本块大小
+    stbuf->f_blocks = 1000;    //文件系统数据块总数
+    stbuf->f_bfree = 500;     //可用块数
+    stbuf->f_bavail = 500;    //非超级用户可获取的块数
+    stbuf->f_files = 50;     //文件结点总数
+    stbuf->f_ffree = 25;     //可用文件结点数
+    stbuf->f_favail = 25;    //非超级用户的可用文件结点数
     stbuf->f_fsid = 0;      //文件系统标识
     stbuf->f_flag = 0;      //挂载标志
     stbuf->f_namemax = 255;   //最大文件名长度
@@ -525,6 +503,7 @@ xmp_destroy(__attribute__((unused)) void *userdata) {
 //    closedir(dev_null_dir);
     // 释放哈希环的内存
     freeHashRing();
+    free(read_null_buf);
     close(dev_null_fd);
 }
 
@@ -673,6 +652,13 @@ int main(int argc, char *argv[]) {
     // 初始化哈希环
     for (int i = 0; i < HASH_RING_SIZE; i++) {
         hashRing[i].path = NULL;
+    }
+
+    read_null_buf = malloc(sizeof(struct fuse_bufvec));
+    if (read_null_buf == NULL) {
+        fprintf(stderr, "分配内存大小: %zu 失败\n", sizeof(struct fuse_bufvec));
+        perror("Error allocating memory");
+        return 1;
     }
 
     umask(0);

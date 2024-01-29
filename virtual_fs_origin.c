@@ -342,30 +342,31 @@ static int xmp_readlink(__attribute__((unused)) const char *path, char *buf, __a
 }
 
 struct xmp_dirp {
-    DIR *dp;
+    __attribute__((unused)) DIR *dp;
     __attribute__((unused)) struct dirent *entry;
     __attribute__((unused)) off_t offset;
 };
 
 static int xmp_opendir(const char *path, struct fuse_file_info *fi) {
-//    int res;
-    struct xmp_dirp *d = malloc(sizeof(struct xmp_dirp));
-    if (d == NULL)
-        return -ENOMEM;
-
-    d->dp = opendir(path);
-    if (d->dp == NULL) {
-        // 目录不存在，伪装一个虚拟的目录
-        d->dp = opendir("/tmp"); // 伪装成/tmp目录
-//        res = -errno;
-//        free(d);
-//        return res;
-    }
-    d->offset = 0;
-    d->entry = NULL;
-
-    fi->fh = (unsigned long) d;
     return 0;
+//    int res;
+//    struct xmp_dirp *d = malloc(sizeof(struct xmp_dirp));
+//    if (d == NULL)
+//        return -ENOMEM;
+//
+//    d->dp = opendir(path);
+//    if (d->dp == NULL) {
+//        // 目录不存在，伪装一个虚拟的目录
+//        d->dp = opendir("/tmp"); // 伪装成/tmp目录
+////        res = -errno;
+////        free(d);
+////        return res;
+//    }
+//    d->offset = 0;
+//    d->entry = NULL;
+//
+//    fi->fh = (unsigned long) d;
+//    return 0;
 }
 
 __attribute__((unused)) static inline struct xmp_dirp *get_dirp(struct fuse_file_info *fi) {

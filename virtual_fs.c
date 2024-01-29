@@ -53,11 +53,13 @@ static int dev_null_fd;
 // 全局变量，用于存储预设的符号链接路径
 static const char *linkpath = "/dev/null";
 
-// 全局变量保存虚拟文件的状态信息
+// 全局变量, 保存虚拟文件的状态信息
 struct stat virtual_file_stat;
 
 // 全局变量，用于记录文件是否被访问,默认为true
 static bool isfileAccessed = true;
+
+//static struct fuse_bufvec *read_null_buf;
 
 // 哈希环的长度
 enum {
@@ -193,6 +195,7 @@ static unsigned short int is_directory(const char *path) {
 }
 
 static int xmp_getattr(const char *path, struct stat *stbuf) {
+//    获取指定路径的文件或目录的属性
 //     debug,打印信息到文件
 //    FILE *fp = fopen("/tmp/debug.log", "a");
 //    fprintf(fp, "xmp_getattr path: %s\n", path);
@@ -217,9 +220,8 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
 
 static int xmp_fgetattr(const char *path, struct stat *stbuf,
                         __attribute__((unused)) struct fuse_file_info *fi) {
-    const char *path_ = path + 1;
-
-    if (!(*path_) || is_directory(path_)) {
+//    在已打开的文件描述符上获取文件或目录的属性
+    if (!(*(path + 1)) || is_directory(path)) {
         stbuf->st_mode = S_IFDIR | 0755;
         stbuf->st_nlink = 2;
     } else {
@@ -414,9 +416,24 @@ static int xmp_read(__attribute__((unused)) const char *path, __attribute__((unu
     return 0; // 欺骗性返回读取的字节数，但实际上并未进行读取
 }
 
-static int xmp_read_buf(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_bufvec **bufp,
-                        __attribute__((unused)) size_t size, __attribute__((unused)) off_t offset,
-                        __attribute__((unused)) struct fuse_file_info *fi) {
+static int xmp_read_buf(const char *path, struct fuse_bufvec **bufp,
+                        size_t size, off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
+    struct fuse_bufvec *src;
+
+    (void) path;
+
+    src = malloc(sizeof(struct fuse_bufvec));
+    if (src == NULL)
+        return -ENOMEM;
+
+    *src = FUSE_BUFVEC_INIT(size);
+
+    src->buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+    src->buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
+    src->buf[0].pos = offset;
+
+    *bufp = src;
+
     return 0;
 }
 
@@ -425,9 +442,15 @@ static int xmp_write(__attribute__((unused)) const char *path, __attribute__((un
     return (int) size; // 欺骗性返回写入的字节数，但实际上并未进行写入
 }
 
-static int xmp_write_buf(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_bufvec *buf,
-                         __attribute__((unused)) off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
-    return 0;
+static int xmp_write_buf(__attribute__((unused)) const char *path, struct fuse_bufvec *buf,
+                         off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
+
+    struct fuse_bufvec dst = FUSE_BUFVEC_INIT(fuse_buf_size(buf));
+    dst.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+    dst.buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
+    dst.buf[0].pos = offset;
+
+    return (int) fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
 }
 
 static int xmp_statfs(__attribute__((unused)) const char *path, struct statvfs *stbuf) {
@@ -492,7 +515,8 @@ static int xmp_getxattr(__attribute__((unused)) const char *path, __attribute__(
     return 0;
 }
 
-static int xmp_listxattr(__attribute__((unused)) const char *path, char *list, size_t size) {
+static int xmp_listxattr(__attribute__((unused)) const char *path, __attribute__((unused)) char *list,
+                         __attribute__((unused)) size_t size) {
     return 0;
 }
 
@@ -651,7 +675,6 @@ int main(int argc, char *argv[]) {
 
     // 判断文件夹是否存在
     if (access(argv[1], F_OK) == -1) {
-//        fprintf(stderr, "挂载路径不存在: %s\n", argv[1]);
         mkdir(argv[1], 0777);
         fprintf(stderr, "已创建路径: %s\n", argv[1]);
     }
@@ -674,13 +697,6 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < HASH_RING_SIZE; i++) {
         hashRing[i].path = NULL;
     }
-
-//    int fd = open(argv[1], O_RDWR);
-//    dev_null_dir = fdopendir(fd);
-//    if (dev_null_dir == NULL) {
-//        fprintf(stderr, "Cannot open directory stream for %s: %s\n", argv[1], strerror(errno));
-//        exit(EXIT_FAILURE);
-//    }
 
     umask(0);
     return fuse_main(argc, argv, &xmp_oper, NULL);

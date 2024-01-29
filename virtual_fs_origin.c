@@ -5,9 +5,9 @@
 #define HAVE_SETXATTR    1
 
 #ifdef __APPLE__
-//#define _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
 #else
-//#define _GNU_SOURCE
+#define _GNU_SOURCE
 #endif
 
 #include <fuse.h>

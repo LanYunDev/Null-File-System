@@ -15,6 +15,37 @@
 // 全局变量，用于保存监视进程的pid
 static pid_t targetPid;
 
+// 全局变量，用于存储挂载路径
+static const char *point_path;
+
+// 获取指定 pid 进程的名称
+static char processName[PROC_PIDPATHINFO_MAXSIZE];
+
+static unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
+    // 计算需要的内存大小，包括命令字符串和终结符 '\0'
+    size_t command_size =
+            strlen(directory_path) + strlen(command_prefix) + 5;  // 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
+
+    // 分配足够的内存
+    char *command = (char *) malloc(command_size);
+
+    if (command == NULL) {
+        fprintf(stderr, "分配内存大小: %zu 失败\n", command_size);
+        perror("Error allocating memory");
+        return 1;
+    }
+
+    // 构建删除命令并执行
+    snprintf(command, command_size, "%s '%s'", "umount", directory_path);
+
+    unsigned short int ret = system(command);
+
+    // 释放动态分配的内存
+    free(command);
+
+    return ret;
+}
+
 // 信号处理函数
 static void handleMonitor(__attribute__((unused)) int signal) {
     FILE *fp = fopen("/tmp/fs_Memory.log", "a");
@@ -26,9 +57,19 @@ static void handleMonitor(__attribute__((unused)) int signal) {
     strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
     // 写入格式化后的时间字符串到文件
     fprintf(fp, "%s\n", time_str);
-    fprintf(fp, "监控进程被杀死, 开始杀死指定进程pid: %d\n", targetPid);
+    fprintf(fp, "监控进程被杀死, 开始结束指定进程pid: %d\n", targetPid);
+
+    proc_pidpath(targetPid, processName, sizeof(processName));
+    if (strstr(processName, "virtual_fs") != NULL) {
+        if (kill(targetPid, SIGTERM)) {
+            if ((!access(point_path, F_OK)) && execute_command("umount", point_path)) {
+                if ((!access(point_path, F_OK)) && execute_command("diskutil umount force", point_path)) {
+                    fprintf(fp, "结束进程似乎失败了\n");
+                }
+            }
+        }
+    }
     fclose(fp);
-    kill(targetPid, SIGTERM);
     // 结束当前进程
     exit(EXIT_SUCCESS);
 }
@@ -38,8 +79,6 @@ void monitorMemory() {
     struct proc_taskinfo taskInfo;
     unsigned short int searchDepth = 20;
 
-    // 获取指定 pid 进程的名称
-    char processName[PROC_PIDPATHINFO_MAXSIZE];
     SearchProcess:
     if (proc_pidpath(targetPid, processName, sizeof(processName)) <= 0) {
         perror("Failed to get process name");
@@ -91,20 +130,22 @@ void monitorMemory() {
         sleep(10);
     }
 }
+
 int main(int argc, char *argv[]) {
     // 检查命令行参数数量
-    if (argc == 1) {
-        fprintf(stderr, "用法: %s <监控进程pid>\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "用法: %s <监控进程pid> <挂载路径>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
     char *endptr;
-    targetPid = (int)strtol(argv[1], &endptr, 10);
+    targetPid = (int) strtol(argv[1], &endptr, 10);
 
     // 检查是否转换成功
     if (*endptr != '\0' || endptr == argv[1]) {
         fprintf(stderr, "Invalid number: %s\n", argv[1]);
         return 1;
     }
+    point_path = argv[2];
 
     sleep(3);  // 等待 virtual_fs 进程启动
     monitorMemory();

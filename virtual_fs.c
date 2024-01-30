@@ -32,6 +32,9 @@ typedef unsigned long  u_long;
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;
 
+// 全局变量，用于存储挂载路径
+static const char *point_path;
+
 // 全局变量，用于存储预设的符号链接路径
 static const char *linkpath = "/dev/null";
 
@@ -43,6 +46,9 @@ static bool isfileAccessed = true;
 
 // 全局变量，用于保存读取的数据
 static struct fuse_bufvec *read_null_buf;
+
+// 全局变量，用于保存子进程pid
+pid_t pid;
 
 // 哈希环的长度
 enum {
@@ -177,9 +183,9 @@ static unsigned short int is_directory(const char *path) {
     return 1;
 }
 
-static unsigned short  int execute_rm_command(const char *directory_path) {
+static unsigned short  int execute_command(const char *command_prefix,const char *directory_path) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
-    size_t command_size = strlen(directory_path) + 11;  // "rm -rf '‘" 长度为 9，额外留两个字符给目录路径和终结符 '\0'
+    size_t command_size = strlen(directory_path) + strlen(command_prefix) + 5;  // 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
 
     // 检查内存大小是否超过限制
     if (command_size > 1 * 1024 * 1024 * 1024) {
@@ -197,28 +203,65 @@ static unsigned short  int execute_rm_command(const char *directory_path) {
     }
 
     // 构建删除命令并执行
-    snprintf(command, command_size, "rm -rf '%s'", directory_path);
+    snprintf(command, command_size, "%s '%s'", command_prefix,directory_path);
     fprintf(stderr, "将要执行命令: %s\n", command);
 
     // 提示用户确认
-    printf("Are you sure you want to execute this command %s? Press y key to confirm...\n", command);
-    printf("是否执行这条命令%s?按y键确认...\n", command);
-    char input = (char) getchar();  // 等待用户按下任意键
+//    printf("Are you sure you want to execute this command %s? Press y key to confirm...\n", command);
+//    printf("是否执行这条命令%s?按y键确认...\n", command);
+//    char input = (char) getchar();  // 等待用户按下任意键
+//
+//    if (input != 'y') {
+//        fprintf(stderr, "用户取消执行命令\n");
+//        free(command);
+//        return 1;
+//    }
 
-    if (input != 'y') {
-        fprintf(stderr, "用户取消执行命令\n");
-        free(command);
-        return 1;
-    }
-
-    system(command);
+    unsigned short int ret = system(command);
 
     // 释放动态分配的内存
     free(command);
 
-    return 0;
+    return ret;
 }
 
+void handle_sigterm(int signum) {
+    if (signum == SIGTERM) {
+//        printf("Received SIGTERM signal. Performing cleanup...\n");
+        execute_command("umount", point_path);
+//        exit(0); // 退出进程
+    }
+}
+
+static unsigned short  int delete_empty_directory(const char *path) {
+    DIR *dir;
+    struct dirent *entry;
+
+    // 打开目录
+    dir = opendir(path);
+    if (dir == NULL) {
+        perror("Error opening directory");
+        return 1;
+    }
+    // 遍历目录
+    while ((entry = readdir(dir)) != NULL) {
+        // 忽略 "." 和 ".." 目录
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            closedir(dir);
+            fprintf(stderr, "目录不为空\n");
+            return 1;
+        }
+    }
+    // 关闭目录
+    closedir(dir);
+
+    // 删除空目录
+    if (rmdir(path) != 0) {
+        perror("Error deleting directory");
+        return 1;
+    }
+    return 0;
+}
 
 static int xmp_getattr(const char *path, struct stat *stbuf) {
 //    获取指定路径的文件或目录的属性
@@ -558,11 +601,11 @@ xmp_init(struct fuse_conn_info *conn) {
 
 void
 xmp_destroy(__attribute__((unused)) void *userdata) {
-//    closedir(dev_null_dir);
-    // 释放哈希环的内存
-    freeHashRing();
-    free(read_null_buf);
-    close(dev_null_fd);
+    freeHashRing(); // 释放哈希环的内存
+    free(read_null_buf); // 释放缓冲区的内存
+    close(dev_null_fd); // 关闭/dev/null的文件描述符
+    delete_empty_directory(point_path); // 删除空目录
+    kill(pid, SIGTERM); // 结束子进程
 }
 
 #ifndef __APPLE__
@@ -651,17 +694,18 @@ int main(int argc, char *argv[]) {
 
     // 检查是否包含 "-delete" 参数
     if (argc > 2 && strcmp(argv[1], "-delete") == 0) {
-        execute_rm_command(argv[2]);
+        execute_command("rm -rf",argv[2]);
 
         argv[1] = argv[2];
         argc--;
     }
 
+    point_path = argv[1];
     // 判断路径是否为目录
     struct stat file_stat;
     if (stat(argv[1], &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
         fprintf(stderr, "⚠️警告: 路径: %s 不是一个目录\n", argv[1]);
-        execute_rm_command(argv[1]);
+        execute_command("rm -rf",argv[1]);
     }
     // 判断路径是否存在
     if (access(argv[1], F_OK) == -1) {
@@ -670,10 +714,10 @@ int main(int argc, char *argv[]) {
     }
 
     // 启动子进程来监视内存
-    pid_t pid = fork();
+    pid = fork();
 
     if (pid == 0) {
-        char *new_argv[] = {NULL, NULL, NULL};
+        char *new_argv[] = {NULL, NULL,argv[1], NULL};
         // 构建新的 argv，将 argv[0] 加上 "_monitor"
         new_argv[0] = malloc(strlen(argv[0]) + strlen("_monitor") + 1);
         strcpy(new_argv[0], argv[0]);
@@ -740,9 +784,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    // 设置 SIGTERM 信号的处理函数
+    signal(SIGTERM, handle_sigterm);
+
     umask(0);
-    int ret = fuse_main(argc, argv, &xmp_oper, NULL);
-    kill(pid, SIGTERM);
-    return  ret;
+    return fuse_main(argc, argv, &xmp_oper, NULL);
 }
 

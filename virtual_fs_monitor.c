@@ -10,13 +10,19 @@
 #include <libproc.h>
 
 #define MEGABYTE (1024 * 1024)  // 1MB
-#define MEMORY_THRESHOLD (10 * MEGABYTE)    // 10MB
+#define MEMORY_THRESHOLD (15 * MEGABYTE)    // 15MB
 
 // 全局变量，用于保存监视进程的pid
 static pid_t targetPid;
 
 // 全局变量，用于存储挂载路径
 static const char *point_path;
+
+// 全局变量，用于调试信息的文件路径
+static const char *debugFilePath = "/tmp/fs_Memory.log";
+static const char *Main_debugFilePath = "/tmp/fs_debug.log";
+
+static const size_t thresholdMB = 2;
 
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
@@ -46,9 +52,39 @@ static unsigned short int execute_command(const char *command_prefix, const char
     return ret;
 }
 
+// 函数用于检查文件大小是否超过指定大小
+unsigned short int fileSizeCheck(const char *filePath) {
+    struct stat fileStat;
+
+    // 获取文件信息
+    if (stat(filePath, &fileStat) != 0) {
+        return 0; // 文件不存在
+//        perror("stat");
+//        return -1; // 获取文件信息失败
+    }
+
+    // 判断文件大小是否超过指定大小
+    if (fileStat.st_size > thresholdMB * MEGABYTE) {
+        return 1; // 文件大小超过指定大小
+    } else {
+        return 0; // 文件大小未超过指定大小
+    }
+}
+
+static void exit_process(FILE *fp) {
+    if (strstr(processName, "virtual_fs") != NULL) {
+        kill(targetPid, SIGTERM);
+        if ((!access(point_path, F_OK)) && execute_command("umount", point_path)) {
+            if ((!access(point_path, F_OK)) && execute_command("diskutil umount force", point_path)) {
+                fprintf(fp, "结束进程似乎失败了\n");
+            }
+        }
+    }
+}
+
 // 信号处理函数
 static void handleMonitor(__attribute__((unused)) int signal) {
-    FILE *fp = fopen("/tmp/fs_Memory.log", "a");
+    FILE *fp = fopen(debugFilePath, "a");
     // 获取当前时间
     time_t current_time;
     time(&current_time);
@@ -60,15 +96,7 @@ static void handleMonitor(__attribute__((unused)) int signal) {
     fprintf(fp, "监控进程被杀死, 开始结束指定进程pid: %d\n", targetPid);
 
     proc_pidpath(targetPid, processName, sizeof(processName));
-    if (strstr(processName, "virtual_fs") != NULL) {
-        if (kill(targetPid, SIGTERM)) {
-            if ((!access(point_path, F_OK)) && execute_command("umount", point_path)) {
-                if ((!access(point_path, F_OK)) && execute_command("diskutil umount force", point_path)) {
-                    fprintf(fp, "结束进程似乎失败了\n");
-                }
-            }
-        }
-    }
+    exit_process(fp);
     fclose(fp);
     // 结束当前进程
     exit(EXIT_SUCCESS);
@@ -110,7 +138,7 @@ void monitorMemory() {
 
         // 如果内存使用超过阈值，发送信号给主进程
         if (memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE) {
-            FILE *fp = fopen("/tmp/fs_Memory.log", "a");
+            FILE *fp = fopen(debugFilePath, "a");
             // 获取当前时间
             time_t current_time;
             time(&current_time);
@@ -121,11 +149,29 @@ void monitorMemory() {
             fprintf(fp, "%s\n", time_str);
             fprintf(fp, "内存使用超过阈值: %d MB\n", MEMORY_THRESHOLD / MEGABYTE);
             fprintf(fp, "内存使用: %ld MB\n", memoryUsageMB);
+            exit_process(fp);
             fclose(fp);
-            kill(targetPid, SIGTERM);
+            // 结束当前进程
+            exit(EXIT_SUCCESS);
+        } else if (memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE / 3) {
+            kill(targetPid, SIGUSR1); // 发送收集日志信号
+        } else if (fileSizeCheck(Main_debugFilePath)) {
+            FILE *fp = fopen(debugFilePath, "a");
+            // 获取当前时间
+            time_t current_time;
+            time(&current_time);
+            // 将时间格式化为字符串
+            char time_str[100];  // 适当大小的字符数组
+            strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
+            // 写入格式化后的时间字符串到文件
+            fprintf(fp, "%s\n", time_str);
+            fprintf(fp, "文件大小超过阈值: %zu MB\n", thresholdMB);
+            exit_process(fp);
+            fclose(fp);
             // 结束当前进程
             exit(EXIT_SUCCESS);
         }
+
         // 每隔一段时间检查一次，避免频繁检查
         sleep(10);
     }

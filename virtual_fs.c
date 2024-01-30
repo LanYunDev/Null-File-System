@@ -26,8 +26,7 @@ typedef unsigned long  u_long;
 #endif
 
 #define MEGABYTE (1024 * 1024)  // 1MB
-#define MEMORY_THRESHOLD (10 * MEGABYTE)    // 10MB
-
+#define MEMORY_THRESHOLD (15 * MEGABYTE)    // 15MB
 
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;
@@ -43,6 +42,28 @@ struct stat virtual_file_stat;
 
 // 全局变量，用于记录文件是否被访问,默认为true
 static bool isfileAccessed = true;
+
+// 全局变量，用于保存调试信息的文件路径
+static const char *debugFilePath = "/tmp/fs_debug.log";
+
+// 全局变量，用于标志内存是否泄露,Release下默认为false
+#ifdef DEBUG
+static bool isMemoryLeak = true;
+#else
+static bool isMemoryLeak = false;
+#endif
+
+FILE *debug_fp;
+
+// 默认开启黑名单模式
+static unsigned short int blackMode = 1;
+
+static const char *blacklists[] = {"Surge", "iStat"};
+static const size_t blacklists_size = sizeof(blacklists) / sizeof(blacklists[0]);
+static const unsigned int compare_length = 5;
+
+static const char *whitelists[] = {"JetBrains"};
+static const size_t whitelists_size = sizeof(whitelists) / sizeof(whitelists[0]);
 
 // 全局变量，用于保存读取的数据
 static struct fuse_bufvec *read_null_buf;
@@ -100,13 +121,22 @@ static void freeHashRing() {
 }
 
 // 字符串前缀匹配函数
-unsigned short int startsWith(const char *str, const char *prefix) {
-    while (*prefix) {
-        if (*prefix++ != *str++) {
-            return 0;  // 字符不匹配，返回假
+//unsigned short int startsWith(const char *str, const char *prefix) {
+//    while (*prefix) {
+//        if (*prefix++ != *str++) {
+//            return 0;  // 字符不匹配，返回假
+//        }
+//    }
+//    return 1;  // 字符匹配，返回真
+//}
+
+unsigned short int arrayIncludes(const char *array[], size_t size, const char *target) {
+    for (size_t i = 0; i < size; ++i) {
+        if (memcmp(array[i], target, compare_length) == 0) {
+            return 1;  // 字符串数组中包含目标字符串
         }
     }
-    return 1;  // 字符匹配，返回真
+    return 0;  // 字符串数组中不包含目标字符串
 }
 
 // 判断字符串是否以指定后缀结尾
@@ -152,16 +182,15 @@ static unsigned short int is_directory(const char *path) {
 
         // 如果找到了后缀，并且后缀中第一个不是数字，则认为是文件
         if (suffix != NULL) {
-            // debug,打印信息到文件
-//            FILE *fp = fopen("/tmp/debug.log", "a");
-//            fprintf(fp, "is_directory path: %s\n", path);
-//            fprintf(fp, "filename: %s\n", filename);
-//            fprintf(fp, "suffix: %s\n", suffix);
-//            // 关闭文件
-//            fclose(fp);
-
             suffix++;  // 移动到后缀的第一个字符
-            const unsigned short int JetBrain_path = startsWith((path + 1), "JetBrains");
+
+            static unsigned short int JetBrain_path;
+            if (blackMode) {
+                JetBrain_path = (!(memcmp((path + 1), "JetBrains", 9)));
+            } else {
+                JetBrain_path = 1;
+            }
+//            const unsigned short int JetBrain_path = (!(strcmp( (path + 1), "JetBrains")));
             if ((*suffix < '0' || *suffix > '9') || (JetBrain_path &&
                                                      ((suffix[-4] == 'c') && (suffix[-3] == 's') &&
                                                       (suffix[-2] == 'v')))) { // 匹配JB中.csv.0 文件
@@ -183,9 +212,10 @@ static unsigned short int is_directory(const char *path) {
     return 1;
 }
 
-static unsigned short  int execute_command(const char *command_prefix,const char *directory_path) {
+static unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
-    size_t command_size = strlen(directory_path) + strlen(command_prefix) + 5;  // 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
+    size_t command_size =
+            strlen(directory_path) + strlen(command_prefix) + 5;  // 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
 
     // 检查内存大小是否超过限制
     if (command_size > 1 * 1024 * 1024 * 1024) {
@@ -203,7 +233,7 @@ static unsigned short  int execute_command(const char *command_prefix,const char
     }
 
     // 构建删除命令并执行
-    snprintf(command, command_size, "%s '%s'", command_prefix,directory_path);
+    snprintf(command, command_size, "%s '%s'", command_prefix, directory_path);
     fprintf(stderr, "将要执行命令: %s\n", command);
 
     // 提示用户确认
@@ -230,10 +260,14 @@ void handle_sigterm(int signum) {
 //        printf("Received SIGTERM signal. Performing cleanup...\n");
         execute_command("umount", point_path);
 //        exit(0); // 退出进程
+    } else if (signum == SIGUSR1) {
+        //     debug,打印信息到文件
+        debug_fp = fopen(debugFilePath, "a");
+        isMemoryLeak = true;
     }
 }
 
-static unsigned short  int delete_empty_directory(const char *path) {
+static unsigned short int delete_empty_directory(const char *path) {
     DIR *dir;
     struct dirent *entry;
 
@@ -265,13 +299,20 @@ static unsigned short  int delete_empty_directory(const char *path) {
 
 static int xmp_getattr(const char *path, struct stat *stbuf) {
 //    获取指定路径的文件或目录的属性
-//     debug,打印信息到文件
-//    FILE *fp = fopen("/tmp/debug.log", "a");
-//    fprintf(fp, "xmp_getattr path: %s\n", path);
-//    fclose(fp);
-    // 对Surge特殊处理
-    if (startsWith((path + 1), "Surge")) {
-        return -ENOENT;
+
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_getattr path: %s\n", path);
+    }
+
+    // 黑名单
+    if (blackMode) {
+        if (arrayIncludes(blacklists, blacklists_size, (path + 1))) {
+            return -ENOENT;
+        }
+    } else {
+        if ((*(path + 1)) && (!arrayIncludes(whitelists, whitelists_size, (path + 1)))) {
+            return -ENOENT;
+        }
     }
 
     if (!(*(path + 1)) || is_directory(path)) {
@@ -295,6 +336,19 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
 static int xmp_fgetattr(__attribute__((unused)) const char *path, __attribute__((unused)) struct stat *stbuf,
                         __attribute__((unused)) struct fuse_file_info *fi) {
 //    在已打开的文件描述符上获取文件或目录的属性
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_fgetattr path: %s\n", path);
+    }
+    // 黑名单
+    if (blackMode) {
+        if (arrayIncludes(blacklists, blacklists_size, (path + 1))) {
+            return -ENOENT;
+        }
+    } else {
+        if (!(*(path + 1)) || !arrayIncludes(whitelists, whitelists_size, (path + 1))) {
+            return -ENOENT;
+        }
+    }
     *stbuf = virtual_file_stat;
     return 0;
 //    if (!(*(path + 1)) || is_directory(path)) {
@@ -310,10 +364,16 @@ static int xmp_fgetattr(__attribute__((unused)) const char *path, __attribute__(
 }
 
 static int xmp_access(__attribute__((unused)) const char *path, __attribute__((unused)) int mask) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_access path: %s\n", path);
+    }
     return 0;
 }
 
 static int xmp_readlink(__attribute__((unused)) const char *path, char *buf, __attribute__((unused)) size_t size) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_readlink path: %s\n", path);
+    }
     // 直接将预设的符号链接路径的地址赋值给buf
     *buf = *(char *) linkpath;
     return 0;
@@ -326,6 +386,9 @@ struct xmp_dirp {
 };
 
 static int xmp_opendir(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_opendir path: %s\n", path);
+    }
     return 0;
 }
 
@@ -335,6 +398,9 @@ __attribute__((unused)) static inline struct xmp_dirp *get_dirp(struct fuse_file
 
 static int xmp_readdir(__attribute__((unused)) const char *path, void *buf, fuse_fill_dir_t filler,
                        __attribute__((unused)) off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_readdir path: %s\n", path);
+    }
     // 只返回"."和".."两个目录项
     filler(buf, ".", NULL, 0);
     filler(buf, "..", NULL, 0);
@@ -343,23 +409,38 @@ static int xmp_readdir(__attribute__((unused)) const char *path, void *buf, fuse
 }
 
 static int xmp_releasedir(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_releasedir path: %s\n", path);
+    }
     return 0;
 }
 
 static int xmp_mknod(__attribute__((unused)) const char *path, __attribute__((unused)) mode_t mode,
                      __attribute__((unused)) dev_t rdev) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_mknod path: %s\n", path);
+    }
     return 0;
 }
 
 static int xmp_mkdir(__attribute__((unused)) const char *path, __attribute__((unused)) mode_t mode) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_mkdir path: %s\n", path);
+    }
     return 0;
 }
 
 static int xmp_unlink(__attribute__((unused)) const char *path) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_unlink path: %s\n", path);
+    }
     return 0;
 }
 
 static int xmp_rmdir(__attribute__((unused)) const char *path) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_rmdir path: %s\n", path);
+    }
     return 0;
 }
 
@@ -393,6 +474,9 @@ static int xmp_link(__attribute__((unused)) const char *from, __attribute__((unu
 
 static int xmp_fsetattr_x(__attribute__((unused)) const char *path, __attribute__((unused)) struct setattr_x *attr,
                           __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_fsetattr_x path: %s\n", path);
+    }
     return 0;
 }
 
@@ -462,12 +546,18 @@ static int xmp_utimens(const char *path, const struct timespec ts[2])
 
 static int
 xmp_create(__attribute__((unused)) const char *path, __attribute__((unused)) mode_t mode, struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_create path: %s\n", path);
+    }
     fi->fh = dev_null_fd;
     return 0; // 欺骗性返回成功，但实际上并未创建文件
 }
 
 static int xmp_open(__attribute__((unused)) const char *path, struct fuse_file_info *fi) {
 //    已知问题: 无法读取有数据的文件,问题不大
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_open path: %s\n", path);
+    }
     fi->fh = dev_null_fd;
     return 0; // 欺骗性返回成功，但实际上并未打开文件
 }
@@ -476,16 +566,23 @@ static int xmp_read(__attribute__((unused)) const char *path, __attribute__((unu
                     __attribute__((unused)) size_t size,
                     __attribute__((unused)) off_t offset,
                     __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_read path: %s\n", path);
+    }
     return 0; // 欺骗性返回读取的字节数，但实际上并未进行读取
 }
 
 static int xmp_read_buf(__attribute__((unused)) const char *path, struct fuse_bufvec **bufp,
-                        size_t size, __attribute__((unused)) off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
+                        size_t size, __attribute__((unused)) off_t offset,
+                        __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_read_buf path: %s\n", path);
+    }
     // 将预设的数据复制到缓冲区
     *read_null_buf = FUSE_BUFVEC_INIT(size);
-    read_null_buf -> buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
-    read_null_buf -> buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
-    read_null_buf -> buf[0].pos = offset;
+    read_null_buf->buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
+    read_null_buf->buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
+    read_null_buf->buf[0].pos = offset;
 
     *bufp = read_null_buf;
 
@@ -499,7 +596,9 @@ static int xmp_write(__attribute__((unused)) const char *path, __attribute__((un
 
 static int xmp_write_buf(__attribute__((unused)) const char *path, struct fuse_bufvec *buf,
                          off_t offset, __attribute__((unused)) struct fuse_file_info *fi) {
-
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_write_buf path: %s\n", path);
+    }
     struct fuse_bufvec dst = FUSE_BUFVEC_INIT(fuse_buf_size(buf));
     dst.buf[0].flags = FUSE_BUF_IS_FD | FUSE_BUF_FD_SEEK;
     dst.buf[0].fd = dev_null_fd; // 使用/dev/null的文件描述符 (int) fi->fh;
@@ -510,6 +609,9 @@ static int xmp_write_buf(__attribute__((unused)) const char *path, struct fuse_b
 
 static int xmp_statfs(__attribute__((unused)) const char *path, __attribute__((unused)) struct statvfs *stbuf) {
 
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_statfs path: %s\n", path);
+    }
     stbuf->f_bsize = 512;  //块大小
     stbuf->f_frsize = 512; //基本块大小
     stbuf->f_blocks = 1000;    //文件系统数据块总数
@@ -526,10 +628,16 @@ static int xmp_statfs(__attribute__((unused)) const char *path, __attribute__((u
 }
 
 static int xmp_flush(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_flush path: %s\n", path);
+    }
     return 0;
 }
 
 static int xmp_release(__attribute__((unused)) const char *path, __attribute__((unused)) struct fuse_file_info *fi) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_release path: %s\n", path);
+    }
     return 0;
 }
 
@@ -559,8 +667,10 @@ static int xmp_setxattr(__attribute__((unused)) const char *path, __attribute__(
 
 
 static int xmp_getxattr(__attribute__((unused)) const char *path, __attribute__((unused)) const char *name, char *value,
-                        __attribute__((unused)) size_t size, __attribute__((unused)) uint32_t position)
-{
+                        __attribute__((unused)) size_t size, __attribute__((unused)) uint32_t position) {
+    if (isMemoryLeak) {
+        fprintf(debug_fp, "xmp_getxattr path: %s\n", path);
+    }
     // 预设的数据
     const char *preset_data = "";
     size_t preset_data_size = strlen(preset_data) + 1;  // 加1是为了包含字符串结束符'\0'
@@ -601,6 +711,13 @@ xmp_init(struct fuse_conn_info *conn) {
 
 void
 xmp_destroy(__attribute__((unused)) void *userdata) {
+    time_t current_time;
+    time(&current_time);
+    char time_str[100];  // 适当大小的字符数组
+    strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
+    fprintf(debug_fp, "%s\n", time_str);
+    fclose(debug_fp);
+
     freeHashRing(); // 释放哈希环的内存
     free(read_null_buf); // 释放缓冲区的内存
     close(dev_null_fd); // 关闭/dev/null的文件描述符
@@ -688,13 +805,49 @@ int main(int argc, char *argv[]) {
 
     // 检查命令行参数数量
     if (argc == 1) {
-        fprintf(stderr, "用法: %s [-delete] <挂载路径>\n", argv[0]);
+        usage_info:
+        fprintf(stderr, "用法: %s [-delete] [-disable_blackMode] <挂载路径>\n", argv[0]);
         exit(EXIT_FAILURE);
+    }
+
+    // 检查参数
+    if (argc > 2) {
+        static unsigned short int flag;
+        if (argc == 3) {
+            if (strcmp(argv[1], "-delete") == 0) {
+                flag = 1;
+            } else if (strcmp(argv[1], "-disable_blackMode") == 0) {
+                flag = 2;
+            }
+            argv[1] = argv[2];
+            argc--;
+        } else if (argc == 4) {
+            if ((strcmp(argv[1], "-delete") == 0) && (strcmp(argv[1], "-disable_blackMode") == 0)) {
+                flag = 3;
+            }
+            argv[1] = argv[3];
+            argc = argc - 2;
+        }
+        switch (flag) {
+            case 1:
+                execute_command("rm -rf", argv[1]);
+                break;
+            case 2:
+                blackMode = 0;
+                break;
+            case 3:
+                execute_command("rm -rf", argv[1]);
+                blackMode = 0;
+                break;
+            default:
+                goto usage_info;
+
+        }
     }
 
     // 检查是否包含 "-delete" 参数
     if (argc > 2 && strcmp(argv[1], "-delete") == 0) {
-        execute_command("rm -rf",argv[2]);
+        execute_command("rm -rf", argv[2]);
 
         argv[1] = argv[2];
         argc--;
@@ -705,7 +858,7 @@ int main(int argc, char *argv[]) {
     struct stat file_stat;
     if (stat(argv[1], &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
         fprintf(stderr, "⚠️警告: 路径: %s 不是一个目录\n", argv[1]);
-        execute_command("rm -rf",argv[1]);
+        execute_command("rm -rf", argv[1]);
     }
     // 判断路径是否存在
     if (access(argv[1], F_OK) == -1) {
@@ -717,7 +870,7 @@ int main(int argc, char *argv[]) {
     pid = fork();
 
     if (pid == 0) {
-        char *new_argv[] = {NULL, NULL,argv[1], NULL};
+        char *new_argv[] = {NULL, NULL, argv[1], NULL};
         // 构建新的 argv，将 argv[0] 加上 "_monitor"
         new_argv[0] = malloc(strlen(argv[0]) + strlen("_monitor") + 1);
         strcpy(new_argv[0], argv[0]);
@@ -758,6 +911,9 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // 打印pid
+    fprintf(stderr, "监控进程pid: %d\n", pid);
+
     dev_null_fd = open("/dev/null", O_RDWR);
     if (dev_null_fd == -1) {
         fprintf(stderr, "Cannot open /dev/null: %s\n", strerror(errno));
@@ -786,6 +942,7 @@ int main(int argc, char *argv[]) {
 
     // 设置 SIGTERM 信号的处理函数
     signal(SIGTERM, handle_sigterm);
+    signal(SIGUSR1, handle_sigterm);
 
     umask(0);
     return fuse_main(argc, argv, &xmp_oper, NULL);

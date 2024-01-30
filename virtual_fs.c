@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <sys/time.h>
 #include <stdarg.h>
+#include <signal.h>
 
 #if defined(_POSIX_C_SOURCE)
 typedef unsigned char  u_char;
@@ -23,6 +24,10 @@ typedef unsigned short u_short;
 typedef unsigned int   u_int;
 typedef unsigned long  u_long;
 #endif
+
+#define MEGABYTE (1024 * 1024)  // 1MB
+#define MEMORY_THRESHOLD (10 * MEGABYTE)    // 10MB
+
 
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;
@@ -36,6 +41,7 @@ struct stat virtual_file_stat;
 // 全局变量，用于记录文件是否被访问,默认为true
 static bool isfileAccessed = true;
 
+// 全局变量，用于保存读取的数据
 static struct fuse_bufvec *read_null_buf;
 
 // 哈希环的长度
@@ -53,29 +59,29 @@ typedef struct {
 HashNode hashRing[HASH_RING_SIZE];
 
 // 计算路径的哈希值
-static unsigned int hashFunction(const char *path) {
+static unsigned int hashFunction(const char *string) {
     unsigned int hash = 0;
-    while (*path) {
-        hash = (hash << HASH_MULTIPLIER) + *path++;
+    while (*string) {
+        hash = (hash << HASH_MULTIPLIER) + *string++;
     }
     return hash % HASH_RING_SIZE;
 }
 
 // 检查路径是否存在于哈希环中
-static bool pathExists(const char *path) {
-    unsigned int index = hashFunction(path);
-    return (hashRing[index].path != NULL) && (strcmp(hashRing[index].path, path) == 0);
+static bool pathExists(const char *string) {
+    unsigned int index = hashFunction(string);
+    return (hashRing[index].path != NULL) && (strcmp(hashRing[index].path, string) == 0);
 }
 
 // 将路径写入哈希环中，覆盖已存在的路径
-static void writePath(const char *path) {
-    unsigned int index = hashFunction(path);
+static void writePath(const char *string) {
+    unsigned int index = hashFunction(string);
     if (hashRing[index].path != NULL) {
         // 覆盖已存在的路径
         free(hashRing[index].path);
     }
     // 分配内存并复制路径
-    hashRing[index].path = strdup(path);
+    hashRing[index].path = strdup(string);
 }
 
 // 释放哈希环的内存
@@ -171,42 +177,93 @@ static unsigned short int is_directory(const char *path) {
     return 1;
 }
 
+static unsigned short  int execute_rm_command(const char *directory_path) {
+    // 计算需要的内存大小，包括命令字符串和终结符 '\0'
+    size_t command_size = strlen(directory_path) + 11;  // "rm -rf '‘" 长度为 9，额外留两个字符给目录路径和终结符 '\0'
+
+    // 检查内存大小是否超过限制
+    if (command_size > 1 * 1024 * 1024 * 1024) {
+        fprintf(stderr, "Memory allocation size exceeds limit (1GB)\n");
+        return 1;
+    }
+
+    // 分配足够的内存
+    char *command = (char *) malloc(command_size);
+
+    if (command == NULL) {
+        fprintf(stderr, "分配内存大小: %zu 失败\n", command_size);
+        perror("Error allocating memory");
+        return 1;
+    }
+
+    // 构建删除命令并执行
+    snprintf(command, command_size, "rm -rf '%s'", directory_path);
+    fprintf(stderr, "将要执行命令: %s\n", command);
+
+    // 提示用户确认
+    printf("Are you sure you want to execute this command %s? Press y key to confirm...\n", command);
+    printf("是否执行这条命令%s?按y键确认...\n", command);
+    char input = (char) getchar();  // 等待用户按下任意键
+
+    if (input != 'y') {
+        fprintf(stderr, "用户取消执行命令\n");
+        free(command);
+        return 1;
+    }
+
+    system(command);
+
+    // 释放动态分配的内存
+    free(command);
+
+    return 0;
+}
+
+
 static int xmp_getattr(const char *path, struct stat *stbuf) {
 //    获取指定路径的文件或目录的属性
 //     debug,打印信息到文件
 //    FILE *fp = fopen("/tmp/debug.log", "a");
 //    fprintf(fp, "xmp_getattr path: %s\n", path);
 //    fclose(fp);
+    // 对Surge特殊处理
+    if (startsWith((path + 1), "Surge")) {
+        return -ENOENT;
+    }
 
     if (!(*(path + 1)) || is_directory(path)) {
-        stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2;
+        stbuf->st_mode = S_IFDIR | 0777; // 目录权限
+        stbuf->st_nlink = 2; // 硬链接数
     } else {
         if (!isfileAccessed) {
             // 初次访问文件，返回文件不存在
             isfileAccessed = true; // 重置文件访问标志
             return -ENOENT;
         }
-        stbuf->st_mode = S_IFREG | 0644;
-        stbuf->st_nlink = 1;
-        stbuf->st_size = 0;
+        *stbuf = virtual_file_stat;
+//        stbuf->st_mode = S_IFREG | 0777;
+//        stbuf->st_nlink = 1;
+//        stbuf->st_size = 0;
     }
 
     return 0;
 }
 
-static int xmp_fgetattr(const char *path, struct stat *stbuf,
+static int xmp_fgetattr(__attribute__((unused)) const char *path, __attribute__((unused)) struct stat *stbuf,
                         __attribute__((unused)) struct fuse_file_info *fi) {
 //    在已打开的文件描述符上获取文件或目录的属性
-    if (!(*(path + 1)) || is_directory(path)) {
-        stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2;
-    } else {
-        stbuf->st_mode = S_IFREG | 0644;
-        stbuf->st_nlink = 1;
-        stbuf->st_size = 0;
-    }
+    *stbuf = virtual_file_stat;
     return 0;
+//    if (!(*(path + 1)) || is_directory(path)) {
+//        stbuf->st_mode = S_IFDIR | 0777;
+//        stbuf->st_nlink = 2;
+//    } else {
+//        *stbuf = virtual_file_stat;
+//        stbuf->st_mode = S_IFREG | 0777;
+//        stbuf->st_nlink = 1;
+//        stbuf->st_size = 0;
+//    }
+//    return 0;
 }
 
 static int xmp_access(__attribute__((unused)) const char *path, __attribute__((unused)) int mask) {
@@ -408,7 +465,8 @@ static int xmp_write_buf(__attribute__((unused)) const char *path, struct fuse_b
     return (int) fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
 }
 
-static int xmp_statfs(__attribute__((unused)) const char *path, struct statvfs *stbuf) {
+static int xmp_statfs(__attribute__((unused)) const char *path, __attribute__((unused)) struct statvfs *stbuf) {
+
     stbuf->f_bsize = 512;  //块大小
     stbuf->f_frsize = 512; //基本块大小
     stbuf->f_blocks = 1000;    //文件系统数据块总数
@@ -418,7 +476,7 @@ static int xmp_statfs(__attribute__((unused)) const char *path, struct statvfs *
     stbuf->f_ffree = 25;     //可用文件结点数
     stbuf->f_favail = 25;    //非超级用户的可用文件结点数
     stbuf->f_fsid = 0;      //文件系统标识
-    stbuf->f_flag = 0;      //挂载标志
+    stbuf->f_flag = 1;      //挂载标志
     stbuf->f_namemax = 255;   //最大文件名长度
 
     return 0;
@@ -593,46 +651,67 @@ int main(int argc, char *argv[]) {
 
     // 检查是否包含 "-delete" 参数
     if (argc > 2 && strcmp(argv[1], "-delete") == 0) {
-        // 计算需要的内存大小，包括命令字符串和终结符 '\0'
-        size_t command_size = strlen(argv[2]) + 11;  // "rm -rf '‘" 长度为 9，额外留两个字符给目录路径和终结符 '\0'
-        // 检查内存大小是否超过限制
-        if (command_size > 1 * 1024 * 1024 * 1024) {
-            fprintf(stderr, "Memory allocation size exceeds limit (1GB)\n");
-            return 1;
-        }
-        // 分配足够的内存
-        char *command = (char *) malloc(command_size);
-
-        if (command == NULL) {
-            fprintf(stderr, "分配内存大小: %zu 失败\n", command_size);
-            perror("Error allocating memory");
-            return 1;
-        }
-        // 构建删除命令并执行
-        snprintf(command, command_size, "rm -rf '%s'", argv[2]);
-        fprintf(stderr, "将要执行命令: %s\n", command);
-
-        // 提示用户确认
-        printf("Are you sure you want to execute this command %s? Press y key to confirm...\n", command);
-        printf("是否执行这条命令%s?按y键确认...\n", command);
-        char input = (char) getchar();  // 等待用户按下任意键
-        if (input != 'y') {
-            fprintf(stderr, "用户取消执行命令\n");
-            return 1;
-        }
-
-        system(command);
-        // 释放动态分配的内存
-        free(command);
+        execute_rm_command(argv[2]);
 
         argv[1] = argv[2];
         argc--;
     }
 
-    // 判断文件夹是否存在
+    // 判断路径是否为目录
+    struct stat file_stat;
+    if (stat(argv[1], &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
+        fprintf(stderr, "⚠️警告: 路径: %s 不是一个目录\n", argv[1]);
+        execute_rm_command(argv[1]);
+    }
+    // 判断路径是否存在
     if (access(argv[1], F_OK) == -1) {
         mkdir(argv[1], 0777);
         fprintf(stderr, "已创建路径: %s\n", argv[1]);
+    }
+
+    // 启动子进程来监视内存
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        char *new_argv[] = {NULL, NULL, NULL};
+        // 构建新的 argv，将 argv[0] 加上 "_monitor"
+        new_argv[0] = malloc(strlen(argv[0]) + strlen("_monitor") + 1);
+        strcpy(new_argv[0], argv[0]);
+        strcat(new_argv[0], "_monitor");
+
+        // 设置 arg1 为 getpid() + 2
+        int pid_plus_2 = getpid() + 2;
+        int snprintf_result = snprintf(NULL, 0, "%d", pid_plus_2);
+        if (snprintf_result < 0) {
+            perror("snprintf");
+            // 处理错误
+            return 1;
+        }
+        new_argv[1] = malloc(snprintf_result + 1);
+        if (new_argv[1] == NULL) {
+            perror("malloc");
+            // 处理错误
+            return 1;
+        }
+        if (snprintf(new_argv[1], snprintf_result + 1, "%d", pid_plus_2) < 0) {
+            perror("snprintf");
+            // 处理错误
+            free(new_argv[1]);
+            return 1;
+        }
+
+        // 使用 execvp 执行指定路径的程序
+        execvp(new_argv[0], new_argv);
+
+        // 如果 execvp 失败，打印错误信息
+        perror("execvp");
+        free(new_argv[0]);
+        free(new_argv[1]);
+        return 1;
+    } else if (pid < 0) {
+        // 创建子进程失败
+        fprintf(stderr, "创建子进程失败\n");
+        exit(EXIT_FAILURE);
     }
 
     dev_null_fd = open("/dev/null", O_RDWR);
@@ -662,6 +741,8 @@ int main(int argc, char *argv[]) {
     }
 
     umask(0);
-    return fuse_main(argc, argv, &xmp_oper, NULL);
+    int ret = fuse_main(argc, argv, &xmp_oper, NULL);
+    kill(pid, SIGTERM);
+    return  ret;
 }
 

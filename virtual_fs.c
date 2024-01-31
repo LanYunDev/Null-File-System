@@ -77,8 +77,12 @@ static const size_t special_lists_size =
 // 全局变量，用于保存读取的数据
 static struct fuse_bufvec *read_null_buf;
 
+static time_t current_time;
+static char time_str[20];
+static const unsigned short int time_str_size = sizeof(time_str) / sizeof(time_str[0]);
+
 // 全局变量，用于保存子进程pid
-pid_t pid;
+static pid_t pid;
 
 // 哈希环的长度
 enum {
@@ -92,7 +96,7 @@ typedef struct {
 } HashNode;
 
 // 哈希环
-HashNode hashRing[HASH_RING_SIZE];
+static HashNode hashRing[HASH_RING_SIZE];
 
 // 计算路径的哈希值
 static unsigned int hashFunction(const char *string) {
@@ -140,7 +144,7 @@ static void freeHashRing() {
 //    return 1;  // 字符匹配，返回真
 //}
 
-unsigned short int arrayIncludes(const char *array[], size_t size,
+static unsigned short int arrayIncludes(const char *array[], size_t size,
                                  const char *target) {
     for (size_t i = 0; i < size; ++i) {
         if (memcmp(array[i], target, strlen(array[i])) == 0) {
@@ -249,9 +253,9 @@ static unsigned short int execute_command(const char *command_prefix,
 
     // 构建删除命令并执行
     snprintf(command, command_size, "%s \"%s\"", command_prefix, command_suffix);
-    fprintf(stderr, "将要执行命令: %s\n", command);
+    fprintf(stderr, "执行命令: %s\n", command);
 
-    // 提示用户确认
+    // 提示用户确认,都带上参数了,就没必要了.
     //    printf("Are you sure you want to execute this command %s? Press y key to
     //    confirm...\n", command); printf("是否执行这条命令%s?按y键确认...\n",
     //    command); char input = (char) getchar();  // 等待用户按下任意键
@@ -271,7 +275,7 @@ static unsigned short int execute_command(const char *command_prefix,
 }
 
 // 函数用于检查文件大小是否超过指定大小
-unsigned short int fileSizeCheck(const char *filePath) {
+static unsigned short int fileSizeCheck(const char *filePath) {
     struct stat fileStat;
 
     // 获取文件信息
@@ -287,7 +291,7 @@ unsigned short int fileSizeCheck(const char *filePath) {
     }
 }
 
-unsigned short int logFileCheck(const char *filePath, const char *description) {
+static unsigned short int logFileCheck(const char *filePath, const char *description) {
     if (fileSizeCheck(filePath)) {
         fprintf(stderr, "⚠️警告: %s日志文件大小超过阈值: %zu MB\n", description, thresholdMB);
         size_t command_size = strlen("tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") + strlen(filePath) + 1;
@@ -304,7 +308,7 @@ unsigned short int logFileCheck(const char *filePath, const char *description) {
     return 0;
 }
 
-void handle_sigterm(int signum) {
+static void handle_sigterm(int signum) {
     if (signum == SIGTERM) {
         //        printf("Received SIGTERM signal. Performing cleanup...\n");
         execute_command("umount", point_path);
@@ -312,6 +316,12 @@ void handle_sigterm(int signum) {
     } else if (signum == SIGUSR1) {
         //     debug,打印信息到文件
         debug_fp = fopen(debugFilePath, "a");
+        fprintf(debug_fp, "Received SIGUSR1 signal.\n");
+        fprintf(debug_fp, "当前挂载路径: %s\n", point_path);
+        time(&current_time);
+        strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
+                 localtime(&current_time));
+        fprintf(debug_fp, "退出时间: %s\n", time_str);
         isMemoryLeak = true;
     }
 }
@@ -806,12 +816,10 @@ void *xmp_init(struct fuse_conn_info *conn) {
 
 void xmp_destroy(__attribute__((unused)) void *userdata) {
     //    fprintf(stderr, "即将退出! \n");
-    time_t current_time;
     time(&current_time);
-    char time_str[100];// 适当大小的字符数组
-    strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S",
+    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
              localtime(&current_time));
-    fprintf(debug_fp, "%s\n", time_str);
+    fprintf(debug_fp, "退出时间: %s\n", time_str);
     fclose(debug_fp);
 
     freeHashRing();                    // 释放哈希环的内存
@@ -896,9 +904,15 @@ static struct fuse_operations xmp_oper = {
 
 int main(int argc, char *argv[]) {
 #ifdef DEBUG
-    debug_fp = fopen(debugFilePath, "a");
     fprintf(stderr, "编译使用fuse版本: %d\n", FUSE_USE_VERSION);
     fprintf(stderr, "本地安装fuse版本: %d\n", FUSE_VERSION);
+    debug_fp = fopen(debugFilePath, "a");
+    fprintf(stderr, "⚠️警告: 已开启Debug日志记录!\n");
+    fprintf(debug_fp, "当前挂载路径: %s\n", point_path);
+    time(&current_time);
+    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
+             localtime(&current_time));
+    fprintf(debug_fp, "开始时间: %s\n", time_str);
 #endif
 
     // 检查命令行参数数量

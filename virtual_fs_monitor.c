@@ -24,10 +24,14 @@ static const char *Main_debugFilePath = "/tmp/fs_debug.log";
 
 static const size_t thresholdMB = 2;
 
+static time_t current_time;
+static char time_str[20];
+static const unsigned short int time_str_size = sizeof(time_str) / sizeof(time_str[0]);
+
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
 
-static unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
+unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
     size_t command_size =
             strlen(directory_path) + strlen(command_prefix) + 5;// 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
@@ -74,9 +78,10 @@ unsigned short int fileSizeCheck(const char *filePath) {
 static void exit_process(FILE *fp) {
     if (strstr(processName, "virtual_fs") != NULL) {
         kill(targetPid, SIGTERM);
-        if ((!access(point_path, F_OK)) && execute_command("umount", point_path)) {
+        if (!access(point_path, F_OK)) {
+            execute_command("diskutil umount force", point_path);
             sleep(1);
-            if ((!access(point_path, F_OK)) && execute_command("diskutil umount force", point_path)) {
+            if ((!access(point_path, F_OK))) {
                 fprintf(fp, "结束进程似乎失败了\n");
             }
         }
@@ -87,13 +92,11 @@ static void exit_process(FILE *fp) {
 static void handleMonitor(__attribute__((unused)) int signal) {
     FILE *fp = fopen(debugFilePath, "a");
     // 获取当前时间
-    time_t current_time;
     time(&current_time);
     // 将时间格式化为字符串
-    char time_str[100];// 适当大小的字符数组
-    strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
+    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
     // 写入格式化后的时间字符串到文件
-    fprintf(fp, "%s\n", time_str);
+    fprintf(fp, "时间: %s\n", time_str);
     fprintf(fp, "监控进程被杀死, 开始结束指定进程pid: %d\n", targetPid);
 
     proc_pidpath(targetPid, processName, sizeof(processName));
@@ -140,14 +143,10 @@ SearchProcess:
         // 如果内存使用超过阈值，发送信号给主进程
         if (memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE) {
             FILE *fp = fopen(debugFilePath, "a");
-            // 获取当前时间
-            time_t current_time;
             time(&current_time);
-            // 将时间格式化为字符串
-            char time_str[100];// 适当大小的字符数组
-            strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
+            strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
             // 写入格式化后的时间字符串到文件
-            fprintf(fp, "%s\n", time_str);
+            fprintf(fp, "时间: %s\n", time_str);
             fprintf(fp, "内存使用超过阈值: %d MB\n", MEMORY_THRESHOLD / MEGABYTE);
             fprintf(fp, "内存使用: %ld MB\n", memoryUsageMB);
             exit_process(fp);
@@ -158,14 +157,10 @@ SearchProcess:
             kill(targetPid, SIGUSR1);// 发送收集日志信号
         } else if (fileSizeCheck(Main_debugFilePath)) {
             FILE *fp = fopen(debugFilePath, "a");
-            // 获取当前时间
-            time_t current_time;
             time(&current_time);
-            // 将时间格式化为字符串
-            char time_str[100];// 适当大小的字符数组
-            strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
+            strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
             // 写入格式化后的时间字符串到文件
-            fprintf(fp, "%s\n", time_str);
+            fprintf(fp, "时间: %s\n", time_str);
             fprintf(fp, "文件大小超过阈值: %zu MB\n", thresholdMB);
             exit_process(fp);
             fclose(fp);

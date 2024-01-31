@@ -1,16 +1,16 @@
 // 该代码仅用于监控 virtual_fs 进程的内存使用情况,防止发生内存泄露
+#include <dirent.h>
+#include <libproc.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <dirent.h>
-#include <sys/time.h>
-#include <signal.h>
 #include <sys/proc_info.h>
-#include <libproc.h>
+#include <sys/time.h>
+#include <unistd.h>
 
-#define MEGABYTE (1024 * 1024)  // 1MB
-#define MEMORY_THRESHOLD (15 * MEGABYTE)    // 15MB
+#define MEGABYTE (1024 * 1024)          // 1MB
+#define MEMORY_THRESHOLD (15 * MEGABYTE)// 15MB
 
 // 全局变量，用于保存监视进程的pid
 static pid_t targetPid;
@@ -30,7 +30,7 @@ static char processName[PROC_PIDPATHINFO_MAXSIZE];
 static unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
     size_t command_size =
-            strlen(directory_path) + strlen(command_prefix) + 5;  // 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
+            strlen(directory_path) + strlen(command_prefix) + 5;// 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
 
     // 分配足够的内存
     char *command = (char *) malloc(command_size);
@@ -58,16 +58,16 @@ unsigned short int fileSizeCheck(const char *filePath) {
 
     // 获取文件信息
     if (stat(filePath, &fileStat) != 0) {
-        return 0; // 文件不存在
-//        perror("stat");
-//        return -1; // 获取文件信息失败
+        return 0;// 文件不存在
+                 //        perror("stat");
+                 //        return -1; // 获取文件信息失败
     }
 
     // 判断文件大小是否超过指定大小
     if (fileStat.st_size > thresholdMB * MEGABYTE) {
-        return 1; // 文件大小超过指定大小
+        return 1;// 文件大小超过指定大小
     } else {
-        return 0; // 文件大小未超过指定大小
+        return 0;// 文件大小未超过指定大小
     }
 }
 
@@ -90,7 +90,7 @@ static void handleMonitor(__attribute__((unused)) int signal) {
     time_t current_time;
     time(&current_time);
     // 将时间格式化为字符串
-    char time_str[100];  // 适当大小的字符数组
+    char time_str[100];// 适当大小的字符数组
     strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
     // 写入格式化后的时间字符串到文件
     fprintf(fp, "%s\n", time_str);
@@ -108,7 +108,7 @@ void monitorMemory() {
     struct proc_taskinfo taskInfo;
     unsigned short int searchDepth = 20;
 
-    SearchProcess:
+SearchProcess:
     if (proc_pidpath(targetPid, processName, sizeof(processName)) <= 0) {
         perror("Failed to get process name");
         exit(EXIT_FAILURE);
@@ -134,7 +134,7 @@ void monitorMemory() {
             perror("Failed to get process information");
             exit(EXIT_FAILURE);
         }
-//        unsigned long memoryUsageKB = taskInfo.pti_resident_size / 1024;
+        //        unsigned long memoryUsageKB = taskInfo.pti_resident_size / 1024;
         memoryUsageMB = taskInfo.pti_resident_size / 1024 / 1024;
 
         // 如果内存使用超过阈值，发送信号给主进程
@@ -144,7 +144,7 @@ void monitorMemory() {
             time_t current_time;
             time(&current_time);
             // 将时间格式化为字符串
-            char time_str[100];  // 适当大小的字符数组
+            char time_str[100];// 适当大小的字符数组
             strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
             // 写入格式化后的时间字符串到文件
             fprintf(fp, "%s\n", time_str);
@@ -155,14 +155,14 @@ void monitorMemory() {
             // 结束当前进程
             exit(EXIT_SUCCESS);
         } else if (memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE / 3) {
-            kill(targetPid, SIGUSR1); // 发送收集日志信号
+            kill(targetPid, SIGUSR1);// 发送收集日志信号
         } else if (fileSizeCheck(Main_debugFilePath)) {
             FILE *fp = fopen(debugFilePath, "a");
             // 获取当前时间
             time_t current_time;
             time(&current_time);
             // 将时间格式化为字符串
-            char time_str[100];  // 适当大小的字符数组
+            char time_str[100];// 适当大小的字符数组
             strftime(time_str, sizeof(time_str), "时间: %Y-%m-%d %H:%M:%S", localtime(&current_time));
             // 写入格式化后的时间字符串到文件
             fprintf(fp, "%s\n", time_str);
@@ -194,16 +194,8 @@ int main(int argc, char *argv[]) {
     }
     point_path = argv[2];
 
-    sleep(3);  // 等待 virtual_fs 进程启动
+    sleep(3);// 等待 virtual_fs 进程启动
     monitorMemory();
 
     return 0;
 }
-
-
-
-
-
-
-
-

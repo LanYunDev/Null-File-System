@@ -56,18 +56,23 @@ static bool isMemoryLeak = true;
 static bool isMemoryLeak = false;
 #endif
 
-FILE *debug_fp;
+static FILE *debug_fp;
 
 // 默认开启黑名单模式
 static unsigned short int blackMode = 1;
 
-static const char *blacklists[] = {"Surge", "iStat" ,".dat.nosync"};
+static const char *blacklists[] = {"Surge", "iStat", ".dat.nosync"};
 static const size_t blacklists_size =
         sizeof(blacklists) / sizeof(blacklists[0]);
 
 static const char *whitelists[] = {"JetBrains"};
 static const size_t whitelists_size =
         sizeof(whitelists) / sizeof(whitelists[0]);
+
+static const char *special_lists[] = {"apache2"};
+static const size_t special_lists_size =
+        sizeof(special_lists) / sizeof(special_lists[0]);
+// 主要将/apache2 下的 access_log error_log 文件识别为文件.
 
 // 全局变量，用于保存读取的数据
 static struct fuse_bufvec *read_null_buf;
@@ -178,7 +183,7 @@ unsigned short int endsWith(const char *str, int num_suffix, ...) {
 // 函数用于判断路径是否指向一个目录
 static unsigned short int is_directory(const char *path) {
     // 从路径中获取文件名
-    const char *filename = strrchr(path, '/');
+    const char *filename = strrchr(path, '/'); // 得到文件名依然带有'/'
 
     // 如果找到了文件名，则进行判断
     if (filename != NULL) {
@@ -211,7 +216,10 @@ static unsigned short int is_directory(const char *path) {
                 }
                 return 0;
             }
-        }
+        } else if (arrayIncludes(special_lists, special_lists_size, (path + 1)) && (! arrayIncludes(special_lists, special_lists_size, (filename + 1))) ) {
+            // 特殊处理
+                return 0;
+            }
     }
 
     return 1;
@@ -279,9 +287,9 @@ unsigned short int fileSizeCheck(const char *filePath) {
     }
 }
 
-unsigned short int logFileCheck(const char *filePath,const char *description) {
+unsigned short int logFileCheck(const char *filePath, const char *description) {
     if (fileSizeCheck(filePath)) {
-        fprintf(stderr, "⚠️警告: %s日志文件大小超过阈值: %zu MB\n",description, thresholdMB);
+        fprintf(stderr, "⚠️警告: %s日志文件大小超过阈值: %zu MB\n", description, thresholdMB);
         size_t command_size = strlen("tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") + strlen(filePath) + 1;
         char *command_suffix = malloc(command_size);
         snprintf(command_suffix, command_size, "%s \\\"%s\\\"", "tell application \\\"Finder\\\" to delete POSIX file", filePath);
@@ -360,6 +368,9 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
     if (!(*(path + 1)) || is_directory(path)) {
         stbuf->st_mode = S_IFDIR | 0777;// 目录权限
         stbuf->st_nlink = 2;            // 硬链接数
+        if (isMemoryLeak) {
+            fprintf(debug_fp, "xmp_getattr 伪装为文件夹\n");
+        }
     } else {
         if (!isfileAccessed) {
             // 初次访问文件，返回文件不存在
@@ -794,7 +805,7 @@ void *xmp_init(struct fuse_conn_info *conn) {
 }
 
 void xmp_destroy(__attribute__((unused)) void *userdata) {
-//    fprintf(stderr, "即将退出! \n");
+    //    fprintf(stderr, "即将退出! \n");
     time_t current_time;
     time(&current_time);
     char time_str[100];// 适当大小的字符数组
@@ -884,10 +895,11 @@ static struct fuse_operations xmp_oper = {
 };
 
 int main(int argc, char *argv[]) {
-    #ifdef DEBUG
-        fprintf(stderr, "编译使用fuse版本: %d\n", FUSE_USE_VERSION);
-        fprintf(stderr, "本地安装fuse版本: %d\n", FUSE_VERSION);
-    #endif
+#ifdef DEBUG
+    debug_fp = fopen(debugFilePath, "a");
+    fprintf(stderr, "编译使用fuse版本: %d\n", FUSE_USE_VERSION);
+    fprintf(stderr, "本地安装fuse版本: %d\n", FUSE_VERSION);
+#endif
 
     // 检查命令行参数数量
     if (argc == 1) {
@@ -932,7 +944,7 @@ int main(int argc, char *argv[]) {
                 goto usage_info;
         }
         if (flag) {
-            fprintf(stderr, "❌路径 %s 删除失败!.\n", argv[1]);
+            fprintf(stderr, "❌路径 %s 删除失败!\n", argv[1]);
             fprintf(stderr, "请手动处理该错误!\n");
             exit(EXIT_FAILURE);
         }

@@ -75,6 +75,7 @@ static void exit_process(FILE *fp) {
     if (strstr(processName, "virtual_fs") != NULL) {
         kill(targetPid, SIGTERM);
         if ((!access(point_path, F_OK)) && execute_command("umount", point_path)) {
+            sleep(1);
             if ((!access(point_path, F_OK)) && execute_command("diskutil umount force", point_path)) {
                 fprintf(fp, "结束进程似乎失败了\n");
             }
@@ -198,4 +199,11 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
+
+
+
+
+
+
 

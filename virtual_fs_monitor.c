@@ -28,6 +28,9 @@ static time_t current_time;
 static char time_str[20];
 static const unsigned short int time_str_size = sizeof(time_str) / sizeof(time_str[0]);
 
+// 是否发送收集日志信号标志
+static unsigned short int sendCollectLogSignal = 0;
+
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
 
@@ -141,7 +144,7 @@ SearchProcess:
         memoryUsageMB = taskInfo.pti_resident_size / 1024 / 1024;
 
         // 如果内存使用超过阈值，发送信号给主进程
-        if (memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE) {
+        if (sendCollectLogSignal && memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE) {
             FILE *fp = fopen(debugFilePath, "a");
             time(&current_time);
             strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
@@ -154,6 +157,7 @@ SearchProcess:
             // 结束当前进程
             exit(EXIT_SUCCESS);
         } else if (memoryUsageMB > MEMORY_THRESHOLD / MEGABYTE / 3) {
+            sendCollectLogSignal = 1;
             kill(targetPid, SIGUSR1);// 发送收集日志信号
         } else if (fileSizeCheck(Main_debugFilePath)) {
             FILE *fp = fopen(debugFilePath, "a");

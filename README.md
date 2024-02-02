@@ -28,7 +28,7 @@
 
 目前特殊名单有: `apache2`
 
-目前黑名单有: `Surge` `iStat Menus` `.dat.nosync`
+目前黑名单有: `Surge` `iStat Menus` `.dat.nosync` `RustDesk` ".nfs"
 
 目前白名单有: `JetBrains`
 

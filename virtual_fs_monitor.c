@@ -84,8 +84,10 @@ static void exit_process(FILE *fp) {
         if (!access(point_path, F_OK)) {
             execute_command("diskutil umount force", point_path);
             sleep(1);
-            if ((!access(point_path, F_OK))) {
-                fprintf(fp, "结束进程似乎失败了\n");
+            if (strstr(processName, "virtual_fs") != NULL && kill(targetPid, SIGKILL) == 0 && access(point_path, F_OK)) {
+                fprintf(fp, "结束进程成功\n");
+            } else {
+                fprintf(fp, "结束进程失败\n");
             }
         }
     }

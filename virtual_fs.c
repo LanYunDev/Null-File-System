@@ -454,7 +454,7 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
 
     // 黑名单
     if (blackMode) {
-        if ((*(path + 1) == '.') || arrayIncludes(blacklists, blacklists_size, (path + 1)) || arrayIncludes((const char **) dynamicBlackLists, (sizeof (dynamicBlackLists) / sizeof (dynamicBlackLists[0])), (path + 1)) || isInDynamicBlackLists(path + 1) ) {
+        if (*(path + 1) && ((*(path + 1) == '.') || arrayIncludes(blacklists, blacklists_size, (path + 1)) || arrayIncludes((const char **) dynamicBlackLists, (sizeof (dynamicBlackLists) / sizeof (dynamicBlackLists[0])), (path + 1)) || isInDynamicBlackLists(path + 1))) {
             return -ENOENT;
         }
     } else {
@@ -1000,7 +1000,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "本地安装fuse版本: %d\n", FUSE_VERSION);
     debug_fp = fopen(debugFilePath, "a");
     fprintf(stderr, "⚠️警告: 已开启Debug日志记录!\n");
-    fprintf(debug_fp, "当前挂载路径: %s\n", point_path);
+    fprintf(debug_fp, "当前挂载路径: %s\n", argv[1]);
     time(&current_time);
     strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
              localtime(&current_time));

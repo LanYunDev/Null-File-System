@@ -61,7 +61,7 @@ static FILE *debug_fp;
 // 默认开启黑名单模式
 static unsigned short int blackMode = 1;
 
-static const char *blacklists[] = {"Surge", "iStat", ".dat.nosync" , "RustDesk"};
+static const char *blacklists[] = {"Surge", "iStat", ".dat.nosync" , "RustDesk" ,".nfs"};
 static const size_t blacklists_size =
         sizeof(blacklists) / sizeof(blacklists[0]);
 

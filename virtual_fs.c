@@ -454,7 +454,7 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
 
     // 黑名单
     if (blackMode) {
-        if (*(path + 1) && ((*(path + 1) == '.') || arrayIncludes(blacklists, blacklists_size, (path + 1)) || arrayIncludes((const char **) dynamicBlackLists, (sizeof (dynamicBlackLists) / sizeof (dynamicBlackLists[0])), (path + 1)) || isInDynamicBlackLists(path + 1))) {
+        if (*(path + 1) && ((*(path + 1) == '.') || arrayIncludes(blacklists, blacklists_size, (path + 1)) ) ) { // || arrayIncludes((const char **) dynamicBlackLists, (sizeof (dynamicBlackLists) / sizeof (dynamicBlackLists[0])), (path + 1)) || isInDynamicBlackLists(path + 1)
             return -ENOENT;
         }
     } else {

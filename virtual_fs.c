@@ -28,6 +28,21 @@ typedef unsigned long u_long;
 #define MEGABYTE (1024 * 1024)          // 1MB
 #define MEMORY_THRESHOLD (15 * MEGABYTE)// 15MB
 
+#define MAX_LISTS 10 // stringLists数据结构的长度
+#define MAX_VISIT_COUNT 5 // 最大访问次数
+#define TIME_LIMIT 10 // 时间限制
+
+typedef struct {
+    char *str;
+    unsigned short int visit_count;
+    time_t first_visit_time;
+} StringInfo;
+
+static StringInfo stringLists[MAX_LISTS];
+
+static unsigned short int FirstAccessCount = 0; // 计数动态变化的文件名
+static char *dynamicBlackLists[11] = {NULL}; // 存储动态黑名单
+
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;
 
@@ -61,7 +76,8 @@ static FILE *debug_fp;
 // 默认开启黑名单模式
 static unsigned short int blackMode = 1;
 
-static const char *blacklists[] = {"Surge", "iStat", ".dat.nosync" , "RustDesk" ,".nfs"};
+static const char *blacklists[] = {"Surge", "iStat", "RustDesk" };
+// ".dat.nosync",".nfs"
 static const size_t blacklists_size =
         sizeof(blacklists) / sizeof(blacklists[0]);
 
@@ -100,9 +116,9 @@ static HashNode hashRing[HASH_RING_SIZE];
 
 // 计算路径的哈希值
 static unsigned int hashFunction(const char *string) {
-    unsigned int hash = 0;
+    unsigned int hash = 5381;
     while (*string) {
-        hash = (hash << HASH_MULTIPLIER) + *string++;
+        hash = ((hash << HASH_MULTIPLIER) + hash) + *string++; // hash * 33 + string
     }
     return hash % HASH_RING_SIZE;
 }
@@ -134,6 +150,79 @@ static void freeHashRing() {
     }
 }
 
+unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
+    // 由于文件名动态变化,故试图截取字符串前1/4长度作为不变量.(已弃用
+    //            dynamicBlackLists[index] = strdup(strncpy(malloc(strlen(input_str) / 4 + 1), input_str, strlen(input_str) / 4));
+    // 比较两个字符串
+    unsigned short int diff_position = -1;  // 记录第一个不同的位置
+    for (unsigned short int i = 0; input_str[i] != '\0' && dynamicBlackLists[10][i] != '\0'; i++) {
+        if (input_str[i] != dynamicBlackLists[10][i]) {
+            diff_position = i;
+            break;
+        }
+    }
+    if (diff_position == (unsigned short int)-1) {
+        // 起始路径不同,遇到这种情况可以做特殊处理,目前没想好怎么处理,先拒绝好了.
+        return 1;
+    }
+    // 将2个文件名相同部分截取出来,并存储
+    dynamicBlackLists[index] = strdup(strncpy(malloc((diff_position + 1 + 1 ) * sizeof(char)), input_str, diff_position+1));
+    dynamicBlackLists[index][diff_position+1] = '\0'; // 实际是第 diff_position + 1 + 1 位
+    return 0;
+}
+
+unsigned short int isInDynamicBlackLists(const char *input_str) {
+    unsigned short int index = hashFunction(input_str);
+
+    if (stringLists[index].str != NULL) {
+        if (strcmp(stringLists[index].str, input_str) != 0) {
+            // 不相同字符串
+            free(stringLists[index].str);
+            goto FirstAccess;
+        }
+
+        current_time = time(NULL);
+        if (current_time - stringLists[index].first_visit_time <= TIME_LIMIT) {
+            stringLists[index].visit_count++;
+            if (stringLists[index].visit_count >= MAX_VISIT_COUNT) {
+//                dynamicBlackLists[0] = strdup(input_str);
+                FirstAccessCount = 0;
+                return 1;
+            }
+        } else {
+            stringLists[index].visit_count = 1;
+            stringLists[index].first_visit_time = current_time;
+        }
+
+        return 0;
+    } else {
+        // 首次访问
+    FirstAccess:
+        FirstAccessCount++;
+
+        if (FirstAccessCount >= MAX_VISIT_COUNT) {
+            // 添加到动态黑名单
+            if (dynamicBlackLists[index] != NULL) {
+                // index位置已存在字符串
+//                if (memcmp(dynamicBlackLists[index], input_str, strlen(dynamicBlackLists[index])) == 0) {
+//                    // 包含黑名单字符串
+//                    // 由于if判断句中已做处理,故此处不再做处理
+//                }
+                free(dynamicBlackLists[index]);
+            }
+            AddDynamicBlackLists(index, input_str);
+            return 1;
+        }
+        if (dynamicBlackLists[10] != NULL) {
+            free(dynamicBlackLists[10]);
+        }
+        stringLists[index].str = dynamicBlackLists[10] = strdup(input_str);
+        stringLists[index].visit_count = 1;
+        stringLists[index].first_visit_time = time(NULL);
+        return 0;
+    }
+}
+
 // 字符串前缀匹配函数
 // unsigned short int startsWith(const char *str, const char *prefix) {
 //    while (*prefix) {
@@ -147,7 +236,7 @@ static void freeHashRing() {
 static unsigned short int arrayIncludes(const char *array[], size_t size,
                                  const char *target) {
     for (size_t i = 0; i < size; ++i) {
-        if (memcmp(array[i], target, strlen(array[i])) == 0) {
+        if ((array[i] != NULL) && memcmp(array[i], target, strlen(array[i])) == 0) {
             return 1;// 字符串数组中包含目标字符串
         }
     }
@@ -365,7 +454,7 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
 
     // 黑名单
     if (blackMode) {
-        if (arrayIncludes(blacklists, blacklists_size, (path + 1))) {
+        if ((*(path + 1) == '.') || arrayIncludes(blacklists, blacklists_size, (path + 1)) || arrayIncludes((const char **) dynamicBlackLists, (sizeof (dynamicBlackLists) / sizeof (dynamicBlackLists[0])), (path + 1)) || isInDynamicBlackLists(path + 1) ) {
             return -ENOENT;
         }
     } else {
@@ -822,6 +911,9 @@ void xmp_destroy(__attribute__((unused)) void *userdata) {
     fprintf(debug_fp, "退出时间: %s\n", time_str);
     fclose(debug_fp);
 
+    for (int i = 0; i < MAX_LISTS; i++) {
+        free(stringLists[i].str);
+    }
     freeHashRing();                    // 释放哈希环的内存
     free(read_null_buf);               // 释放缓冲区的内存
     close(dev_null_fd);                // 关闭/dev/null的文件描述符
@@ -1067,6 +1159,11 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "分配内存大小: %zu 失败\n", sizeof(struct fuse_bufvec));
         perror("Error allocating memory");
         return 1;
+    }
+
+    // 初始化缓冲区
+    for (int i = 0; i < MAX_LISTS; i++) {
+        stringLists[i].str = NULL;
     }
 
     // 设置 SIGTERM 信号的处理函数

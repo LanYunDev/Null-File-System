@@ -12,17 +12,17 @@
 #define MEGABYTE (1024 * 1024)          // 1MB
 #define MEMORY_THRESHOLD (15 * MEGABYTE)// 15MB
 
-// 全局变量，用于保存监视进程的pid
+// 全局变量，用于保存主进程的pid
 static pid_t targetPid;
 
 // 全局变量，用于存储挂载路径
 static const char *point_path;
 
-// 全局变量，用于调试信息的文件路径
+// 全局变量，用于调试信息的日志文件路径
 static const char *debugFilePath = "/tmp/fs_Memory.log";
 static const char *Main_debugFilePath = "/tmp/fs_debug.log";
 
-static const size_t thresholdMB = 2;
+static const size_t thresholdMB = 4;
 
 static time_t current_time;
 static char time_str[20];
@@ -34,7 +34,7 @@ static unsigned short int sendCollectLogSignal = 0;
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
 
-unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
+static unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
     size_t command_size =
             strlen(directory_path) + strlen(command_prefix) + 5;// 2个单引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
@@ -49,7 +49,7 @@ unsigned short int execute_command(const char *command_prefix, const char *direc
     }
 
     // 构建删除命令并执行
-    snprintf(command, command_size, "%s '%s'", "umount", directory_path);
+    snprintf(command, command_size, "%s '%s'", command_prefix, directory_path);
 
     unsigned short int ret = system(command);
 
@@ -81,13 +81,14 @@ unsigned short int fileSizeCheck(const char *filePath) {
 static void exit_process(FILE *fp) {
     if (strstr(processName, "virtual_fs") != NULL) {
         kill(targetPid, SIGTERM);
+        sleep(1);
         if (!access(point_path, F_OK)) {
             execute_command("diskutil umount force", point_path);
             sleep(1);
             if (strstr(processName, "virtual_fs") != NULL && kill(targetPid, SIGKILL) == 0 && access(point_path, F_OK)) {
-                fprintf(fp, "结束进程成功\n");
+                fprintf(fp, "结束进程成功!\n");
             } else {
-                fprintf(fp, "结束进程失败\n");
+                fprintf(fp, "结束进程失败!\n");
             }
         }
     }
@@ -107,6 +108,7 @@ static void handleMonitor(__attribute__((unused)) int signal) {
     proc_pidpath(targetPid, processName, sizeof(processName));
     exit_process(fp);
     fclose(fp);
+    execute_command("open", debugFilePath);
     // 结束当前进程
     exit(EXIT_SUCCESS);
 }
@@ -114,7 +116,7 @@ static void handleMonitor(__attribute__((unused)) int signal) {
 void monitorMemory() {
     // 获取指定 pid 进程的内存使用情况
     struct proc_taskinfo taskInfo;
-    unsigned short int searchDepth = 20;
+    unsigned short int searchDepth = 10;
 
 SearchProcess:
     if (proc_pidpath(targetPid, processName, sizeof(processName)) <= 0) {
@@ -130,7 +132,7 @@ SearchProcess:
             goto SearchProcess;
         }
         // 不包含 "virtual_fs"，不进行内存监视
-        fprintf(stderr, "未找到包含 virtual_fs的进程名, 不进行内存监视\n");
+        fprintf(stderr, "未找到包含virtual_fs的进程名, 不进行内存监视\n");
         exit(EXIT_SUCCESS);
     }
     // 设置信号处理函数
@@ -170,6 +172,7 @@ SearchProcess:
             fprintf(fp, "文件大小超过阈值: %zu MB\n", thresholdMB);
             exit_process(fp);
             fclose(fp);
+            execute_command("open", Main_debugFilePath);
             // 结束当前进程
             exit(EXIT_SUCCESS);
         }
@@ -187,6 +190,7 @@ int main(int argc, char *argv[]) {
     }
     char *endptr;
     targetPid = (int) strtol(argv[1], &endptr, 10);
+    fprintf(stderr, "targetPid: %d\n", targetPid);
 
     // 检查是否转换成功
     if (*endptr != '\0' || endptr == argv[1]) {
@@ -195,7 +199,7 @@ int main(int argc, char *argv[]) {
     }
     point_path = argv[2];
 
-    sleep(3);// 等待 virtual_fs 进程启动
+    sleep(5);// 等待 virtual_fs 进程启动
     monitorMemory();
 
     return 0;

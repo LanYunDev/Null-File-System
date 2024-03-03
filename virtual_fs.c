@@ -97,7 +97,7 @@ static struct fuse_bufvec *read_null_buf;
 
 static time_t firstAccess_time = 0;
 static time_t current_time;
-static time_t lastAccess_time = 0;
+static time_t lastAccess_time;
 static char time_str[20];
 static const unsigned short int time_str_size = sizeof(time_str) / sizeof(time_str[0]);
 
@@ -115,12 +115,13 @@ enum {
 };
 
 // 哈希环节点
-typedef struct {
-    char *path;
-} HashNode;
+//typedef struct {
+//    char *path;
+//} HashNode;
 
 // 哈希环
-static HashNode hashRing[HASH_RING_SIZE];
+//static HashNode hashRing[HASH_RING_SIZE] = {NULL};
+static char *hashRing[HASH_RING_SIZE] = {NULL};
 
 static unsigned short int arrayIncludes(const char *array[], size_t size,
                                         const char *target);
@@ -137,26 +138,28 @@ static unsigned int hashFunction(const char *string) {
 // 检查路径是否存在于哈希环中
 static bool pathExists(const char *string) {
     unsigned int index = hashFunction(string);
-    return (hashRing[index].path != NULL) &&
-           (strcmp(hashRing[index].path, string) == 0);
+    return (hashRing[index] != NULL) &&
+           (strcmp(hashRing[index], string) == 0);
 }
 
 // 将路径写入哈希环中，覆盖已存在的路径
 static void writePath(const char *string) {
     unsigned int index = hashFunction(string);
-    if (hashRing[index].path != NULL) {
+    if (hashRing[index] != NULL) {
         // 覆盖已存在的路径
-        free(hashRing[index].path);
+        free(hashRing[index]);// 释放内存
+        hashRing[index] = NULL;
     }
     // 分配内存并复制路径
-    hashRing[index].path = strdup(string);
+    hashRing[index] = strdup(string);
 }
 
 // 释放哈希环的内存
 static void freeHashRing() {
     for (int i = 0; i < HASH_RING_SIZE; i++) {
-        if (hashRing[i].path != NULL) {
-            free(hashRing[i].path);
+        if (hashRing[i] != NULL) {
+            free(hashRing[i]);
+            hashRing[i] = NULL;
         }
     }
 }
@@ -205,7 +208,12 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
         return 1;
     }
 
-    // 比较两个字符串
+    if (dynamicBlackLists[index] != NULL) {
+        free(dynamicBlackLists[index]);// 释放内存
+        dynamicBlackLists[index] = NULL;
+    }
+
+    // 比较两个字符串,将2个文件名相同部分截取出来,并存储
     unsigned short int diff_position;// 记录第一个不同的位置
     for (unsigned short int i = 0;; i++) {
         if (input_str[i] != dynamicBlackLists[10][i] ||  input_str[i] == '\0' || dynamicBlackLists[10][i] == '\0') {
@@ -222,15 +230,11 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
         return 1;
     }
 
-    // 将2个文件名相同部分截取出来,并存储
-    if (dynamicBlackLists[index] != NULL) {
-        free(dynamicBlackLists[index]);
-    }
-
     dynamicBlackLists[index] = strdup(strncpy(malloc((diff_position + 1 + 1) * sizeof(char)), input_str, diff_position + 1));
     dynamicBlackLists[index][diff_position + 1] = '\0';// 实际是第 diff_position + 1 + 1 位
     sprintf(index_str, "%d", index);
     writeLog(strmerge((const char *[]) {"新增动态黑名单:\n","dynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index], NULL}));
+    lastAccess_time = time(NULL); // 初始化上次访问时间
 
     return 0;
 }
@@ -243,8 +247,8 @@ static unsigned short int isInDynamicBlackLists(const char *input_str) {
         if ((dynamicBlackLists[i] != NULL) && memcmp(dynamicBlackLists[i], input_str, strlen(dynamicBlackLists[i])) == 0) {
             // 判断名单是否过期
             if (current_time - lastAccess_time > TIME_LIMIT*3) {
-                // 过期,释放内存
-                free(dynamicBlackLists[i]);
+                free(dynamicBlackLists[i]);// 释放内存
+                dynamicBlackLists[i] = NULL;
             } else {
                 lastAccess_time = current_time;
                 return 1;// 字符串数组中包含目标字符串
@@ -257,9 +261,13 @@ static unsigned short int isInDynamicBlackLists(const char *input_str) {
     if (stringLists[index].str != NULL) {
         if (strcmp(stringLists[index].str, input_str) != 0) {
             // 不相同字符串,但相同index
-            // 此处可能会释放掉dynamicBlackLists[10]指向的内存块
-//            if (stringLists[index].str == dynamicBlackLists[10]) {}
+            // 注意此处可能会释放掉dynamicBlackLists[10]指向的内存块
+            if (stringLists[index].str == dynamicBlackLists[10]) {
+                // 指向同一块内存
+                dynamicBlackLists[10] = NULL;
+            }
             free(stringLists[index].str);
+            stringLists[index].str = NULL;
             goto FirstAccess;
         }
 
@@ -1125,6 +1133,9 @@ int main(int argc, char *argv[]) {
                 flag = 1;
             } else if (strcmp(argv[1], "-disable_blackMode") == 0) {
                 flag = 2;
+            } else if (strcmp(argv[1], "-d") == 0) {
+                point_path = argv[2]; // 挂载路径
+                goto start_run;
             }
             argv[1] = argv[2];
             argc--;
@@ -1161,6 +1172,7 @@ int main(int argc, char *argv[]) {
     point_path = argv[1]; // 挂载路径
 //    file_path = argv[0]; // 文件路径
 
+start_run:;
     // 判断路径是否为目录
     struct stat file_stat;
     if (stat(argv[1], &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
@@ -1252,7 +1264,7 @@ int main(int argc, char *argv[]) {
 
     // 初始化哈希环
     for (int i = 0; i < HASH_RING_SIZE; i++) {
-        hashRing[i].path = NULL;
+        hashRing[i] = NULL;
     }
 
     read_null_buf = malloc(sizeof(struct fuse_bufvec));
@@ -1272,5 +1284,6 @@ int main(int argc, char *argv[]) {
     signal(SIGUSR1, handle_sigterm);
 
     umask(0);
+
     return fuse_main(argc, argv, &xmp_oper, NULL);
 }

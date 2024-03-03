@@ -14,6 +14,13 @@
 
 // 全局变量，用于保存主进程的pid
 static pid_t targetPid;
+static pid_t pid;
+
+// 全局变量，用于存储pid字符串
+static const char *pid_str;
+
+static const char *tmp_str1;
+static const char *tmp_str2;
 
 // 全局变量，用于存储挂载路径
 static const char *point_path;
@@ -21,6 +28,7 @@ static const char *point_path;
 // 全局变量，用于调试信息的日志文件路径
 static const char *debugFilePath = "/tmp/fs_Memory.log";
 static const char *Main_debugFilePath = "/tmp/fs_debug.log";
+static const char *logFilePath = "/tmp/fs.log";
 
 static const size_t thresholdMB = 4;
 
@@ -33,6 +41,37 @@ static unsigned short int sendCollectLogSignal = 0;
 
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
+
+// 向日志文件中输入内容函数
+unsigned short int writeLog(const char *logContent) {
+    FILE *log_fp = fopen(logFilePath, "a");
+    if (log_fp == NULL) {
+        perror("Filed to open log file\n");
+        return 1;
+    }
+    fprintf(log_fp, "\n%d: %s", pid, logContent);
+    fclose(log_fp);
+    return 0;
+}
+
+// 合并多个字符串函数
+char *strmerge(const char* strings[]) {
+    size_t total_length = 0; // 计算总长度
+    for (size_t i = 0; strings[i] != NULL; i++) {
+        total_length += strlen(strings[i]);
+    }
+    char *result = (char *) malloc(total_length + 1); // +1 用于存储字符串结束符 '\0'
+    if (result == NULL) {
+        perror("Memory allocation failed\n");
+        writeLog("Memory allocation failed\n");
+        return NULL;
+    }
+    result[0] = '\0'; // 确保开始为空字符串
+    for (size_t i = 0; strings[i] != NULL; i++) {
+        strcat(result, strings[i]);
+    }
+    return result;
+}
 
 static unsigned short int execute_command(const char *command_prefix, const char *directory_path) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
@@ -85,13 +124,13 @@ static void exit_process(FILE *fp) {
         if (!access(point_path, F_OK)) {
             execute_command("diskutil umount force", point_path);
             sleep(1);
-            if (strstr(processName, "virtual_fs") != NULL && kill(targetPid, SIGKILL) == 0 && access(point_path, F_OK)) {
-                fprintf(fp, "结束进程成功!\n");
-            } else {
-                fprintf(fp, "结束进程失败!\n");
+            if (!(strstr(processName, "virtual_fs") != NULL && kill(targetPid, SIGKILL) == 0 && access(point_path, F_OK))) {
+                fprintf(fp, "%d: 结束进程失败!\n", targetPid);
+                return;
             }
         }
     }
+    fprintf(fp, "%d: 结束进程成功!\n", targetPid);
 }
 
 // 信号处理函数
@@ -102,11 +141,15 @@ static void handleMonitor(__attribute__((unused)) int signal) {
     // 将时间格式化为字符串
     strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
     // 写入格式化后的时间字符串到文件
-    fprintf(fp, "时间: %s\n", time_str);
-    fprintf(fp, "监控进程被杀死, 开始结束指定进程pid: %d\n", targetPid);
+    fprintf(fp, "%d: 时间: %s\n",pid, time_str);
+    fprintf(fp, "%d: 监控进程被杀死, 开始结束指定进程pid: %d\n", pid,targetPid);
 
-    proc_pidpath(targetPid, processName, sizeof(processName));
-    exit_process(fp);
+    if (proc_pidpath(targetPid, processName, sizeof(processName)) > 0) {
+        writeLog(strmerge((const char *[]) { "时间: ",time_str,"\n监控进程被杀死, 开始结束指定进程pid: ", pid_str, "\n"}));
+        exit_process(fp);
+    } else {
+        fprintf(fp, "%d: 获取进程名失败\n",pid);
+    }
     fclose(fp);
     execute_command("open", debugFilePath);
     // 结束当前进程
@@ -120,6 +163,7 @@ void monitorMemory() {
 
 SearchProcess:
     if (proc_pidpath(targetPid, processName, sizeof(processName)) <= 0) {
+        writeLog(strmerge((const char *[]) {"Failed to get process name,pid: ", pid_str, "\n"}));
         perror("Failed to get process name");
         exit(EXIT_FAILURE);
     }
@@ -133,6 +177,7 @@ SearchProcess:
         }
         // 不包含 "virtual_fs"，不进行内存监视
         fprintf(stderr, "未找到包含virtual_fs的进程名, 不进行内存监视\n");
+        writeLog("未找到包含virtual_fs的进程名, 不进行内存监视\n");
         exit(EXIT_SUCCESS);
     }
     // 设置信号处理函数
@@ -141,6 +186,7 @@ SearchProcess:
     unsigned long memoryUsageMB;
     while (1) {
         if (proc_pidinfo(targetPid, PROC_PIDTASKINFO, 0, &taskInfo, sizeof(taskInfo)) <= 0) {
+            writeLog(strmerge((const char *[]) {"Failed to get process information,pid: ", pid_str, "\n"}));
             perror("Failed to get process information");
             exit(EXIT_FAILURE);
         }
@@ -156,6 +202,9 @@ SearchProcess:
             fprintf(fp, "时间: %s\n", time_str);
             fprintf(fp, "内存使用超过阈值: %d MB\n", MEMORY_THRESHOLD / MEGABYTE);
             fprintf(fp, "内存使用: %ld MB\n", memoryUsageMB);
+            asprintf((char **) &tmp_str1, "%d", MEMORY_THRESHOLD / MEGABYTE);
+            asprintf((char **) &tmp_str2, "%ld", memoryUsageMB);
+            writeLog(strmerge((const char *[]) { "时间: ",time_str,"\n内存使用超过阈值: ", tmp_str1, " MB\n", "内存使用: ",tmp_str2," MB\n"}) );
             exit_process(fp);
             fclose(fp);
             // 结束当前进程
@@ -170,6 +219,8 @@ SearchProcess:
             // 写入格式化后的时间字符串到文件
             fprintf(fp, "时间: %s\n", time_str);
             fprintf(fp, "文件大小超过阈值: %zu MB\n", thresholdMB);
+            asprintf((char **) &tmp_str1, "%zu", thresholdMB);
+            writeLog(strmerge((const char *[]) { "时间: ",time_str,"\n文件大小超过阈值: ", tmp_str1, " MB\n"}));
             exit_process(fp);
             fclose(fp);
             execute_command("open", Main_debugFilePath);
@@ -185,7 +236,7 @@ SearchProcess:
 int main(int argc, char *argv[]) {
     // 检查命令行参数数量
     if (argc < 3) {
-        fprintf(stderr, "用法: %s <监控进程pid> <挂载路径>\n", argv[0]);
+        fprintf(stderr, "用法: %s <主进程Pid> <挂载路径>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
     char *endptr;
@@ -199,7 +250,11 @@ int main(int argc, char *argv[]) {
     }
     point_path = argv[2];
 
-    sleep(5);// 等待 virtual_fs 进程启动
+    // 获取当前进程的pid
+    pid = getpid();
+    asprintf((char **) &pid_str, "%d", pid);
+
+    sleep(3);// 等待 virtual_fs 进程启动
     monitorMemory();
 
     return 0;

@@ -118,42 +118,49 @@ unsigned short int fileSizeCheck(const char *filePath) {
 }
 
 static void exit_process(FILE *fp) {
-    if (strstr(processName, "virtual_fs") != NULL) {
-        kill(targetPid, SIGTERM);
-        sleep(1);
-        if (!access(point_path, F_OK)) {
-            execute_command("diskutil umount force", point_path);
+    if (proc_pidpath(targetPid, processName, sizeof(processName)) > 0) {
+        if (strstr(processName, "virtual_fs") != NULL) {
+            kill(targetPid, SIGTERM);
             sleep(1);
-            if (!(strstr(processName, "virtual_fs") != NULL && kill(targetPid, SIGKILL) == 0 && access(point_path, F_OK))) {
-                fprintf(fp, "%d: 结束进程失败!\n", targetPid);
-                return;
+            if (!access(point_path, F_OK)) {
+                execute_command("diskutil umount force", point_path);
+                sleep(1);
+                if (!(strstr(processName, "virtual_fs") != NULL && kill(targetPid, SIGKILL) == 0 && access(point_path, F_OK))) {
+                    fprintf(fp, "%d: 结束进程失败!\n", targetPid);
+                    return;
+                }
             }
         }
+        fprintf(fp, "%d: 结束进程成功!\n", targetPid);
+    } else {
+        writeLog(strmerge((const char *[]) {"获取进程名失败,pid: ", pid_str, "\n"}));
+        fprintf(fp, "%d: 获取进程名失败\n",pid);
     }
-    fprintf(fp, "%d: 结束进程成功!\n", targetPid);
 }
 
 // 信号处理函数
-static void handleMonitor(__attribute__((unused)) int signal) {
-    FILE *fp = fopen(debugFilePath, "a");
-    // 获取当前时间
-    time(&current_time);
-    // 将时间格式化为字符串
-    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
-    // 写入格式化后的时间字符串到文件
-    fprintf(fp, "%d: 时间: %s\n",pid, time_str);
-    fprintf(fp, "%d: 监控进程被杀死, 开始结束指定进程pid: %d\n", pid,targetPid);
+static void handleMonitor(int signum) {
+    if (signum == SIGTERM) {
+        FILE *fp = fopen(debugFilePath, "a");
+        // 获取当前时间
+        time(&current_time);
+        // 将时间格式化为字符串
+        strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S", localtime(&current_time));
+        // 写入格式化后的时间字符串到文件
+        fprintf(fp, "%d: 时间: %s\n",pid, time_str);
+        fprintf(fp, "%d: 监控进程被杀死, 开始结束指定进程pid: %d\n", pid,targetPid);
 
-    if (proc_pidpath(targetPid, processName, sizeof(processName)) > 0) {
-        writeLog(strmerge((const char *[]) { "时间: ",time_str,"\n监控进程被杀死, 开始结束指定进程pid: ", pid_str, "\n"}));
-        exit_process(fp);
-    } else {
-        fprintf(fp, "%d: 获取进程名失败\n",pid);
+        if (proc_pidpath(targetPid, processName, sizeof(processName)) > 0) {
+            writeLog(strmerge((const char *[]) { "时间: ",time_str,"\n监控进程被杀死, 开始结束指定进程pid: ", pid_str, "\n"}));
+            exit_process(fp);
+        } else {
+            fprintf(fp, "%d: 获取进程名失败\n",pid);
+        }
+        fclose(fp);
+        execute_command("open", debugFilePath);
+        // 结束当前进程
+        exit(EXIT_SUCCESS);
     }
-    fclose(fp);
-    execute_command("open", debugFilePath);
-    // 结束当前进程
-    exit(EXIT_SUCCESS);
 }
 
 void monitorMemory() {
@@ -163,7 +170,7 @@ void monitorMemory() {
 
 SearchProcess:
     if (proc_pidpath(targetPid, processName, sizeof(processName)) <= 0) {
-        writeLog(strmerge((const char *[]) {"Failed to get process name,pid: ", pid_str, "\n"}));
+        writeLog(strmerge((const char *[]) {"获取进程名失败,pid: ", pid_str, "\n"}));
         perror("Failed to get process name");
         exit(EXIT_FAILURE);
     }
@@ -180,8 +187,6 @@ SearchProcess:
         writeLog("未找到包含virtual_fs的进程名, 不进行内存监视\n");
         exit(EXIT_SUCCESS);
     }
-    // 设置信号处理函数
-    signal(SIGTERM, handleMonitor);
 
     unsigned long memoryUsageMB;
     while (1) {
@@ -237,23 +242,26 @@ SearchProcess:
 int main(int argc, char *argv[]) {
     // 检查命令行参数数量
     if (argc < 3) {
-        fprintf(stderr, "用法: %s <主进程Pid> <挂载路径>\n", argv[0]);
+        fprintf(stderr, "用法: %s <挂载路径> <主进程pid>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
     char *endptr;
-    targetPid = (int) strtol(argv[1], &endptr, 10);
+    targetPid = (int) strtol(argv[2], &endptr, 10);
     fprintf(stderr, "targetPid: %d\n", targetPid);
 
     // 检查是否转换成功
-    if (*endptr != '\0' || endptr == argv[1]) {
-        fprintf(stderr, "Invalid number: %s\n", argv[1]);
+    if (*endptr != '\0' || endptr == argv[2]) {
+        fprintf(stderr, "Invalid number: %s\n", argv[2]);
         return 1;
     }
-    point_path = argv[2];
+    point_path = argv[1];
 
     // 获取当前进程的pid
     pid = getpid();
     asprintf((char **) &pid_str, "%d", pid);
+
+    // 设置信号处理函数
+    signal(SIGTERM, handleMonitor);
 
     sleep(3);// 等待 virtual_fs 进程启动
     monitorMemory();

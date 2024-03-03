@@ -9,15 +9,17 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse.h>
+#include <libproc.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/proc_info.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
-#include <pthread.h>
 
 #if defined(_POSIX_C_SOURCE)
 typedef unsigned char u_char;
@@ -44,6 +46,9 @@ static StringInfo stringLists[MAX_LISTS];
 static unsigned short int FirstAccessCount = 0;// 计数动态变化的文件名
 static char *dynamicBlackLists[11] = {NULL};   // 存储动态黑名单
 
+// 获取指定 pid 进程的名称
+static char processName[PROC_PIDPATHINFO_MAXSIZE];
+
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; // 初始化互斥锁
 
 // 全局变量，用于存储/dev/null的文件描述符
@@ -51,7 +56,7 @@ static int dev_null_fd;
 
 // 全局变量，用于存储挂载路径
 static const char *point_path;
-//static const char *file_path;
+static const char *file_path;
 
 // 全局变量，用于存储预设的符号链接路径
 static const char *linkpath = "/dev/null";
@@ -110,6 +115,8 @@ static char index_str[3] = {0};
 static pid_t pid;
 // 用于保存子进程pid
 static pid_t monitorPid = 0;
+// 全局变量，用于存储pid字符串
+static const char *pid_str;
 
 // 哈希环的长度
 enum {
@@ -504,27 +511,57 @@ static unsigned short int logFileCheck(const char *filePath, const char *descrip
             fprintf(stderr, "❌无法将文件移动到废纸篓,请手动处理.\n");
             return 1;
         }
-        //        tell application \"Finder\" to delete POSIX file \"argv[1]\"
+        //        tell application \"Finder\" to delete POSIX file \"point_path\"
         fprintf(stderr, "⚠️已自动将文件移动到废纸篓🗑️\n");
     }
     return 0;
 }
 
 static void handle_sigterm(int signum) {
+    time(&current_time);
+    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
+             localtime(&current_time));
     if (signum == SIGTERM) {
         //        printf("Received SIGTERM signal. Performing cleanup...\n");
+        writeLog(strmerge((const char *[]) {"Received SIGTERM signal. Performing cleanup...\n", "退出时间: ", time_str, NULL}));
         execute_command("umount", point_path);
-        //        exit(0); // 退出进程
+        exit(EXIT_SUCCESS);
     } else if (signum == SIGUSR1) {
         //     debug,打印信息到文件
         debug_fp = fopen(debugFilePath, "a");
         fprintf(debug_fp, "Received SIGUSR1 signal.\n");
         fprintf(debug_fp, "当前挂载路径: %s\n", point_path);
-        time(&current_time);
-        strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
-                 localtime(&current_time));
         fprintf(debug_fp, "退出时间: %s\n", time_str);
         isMemoryLeak = true;
+    } else if (signum == SIGSEGV || signum == SIGABRT) {
+        // 进程崩溃,重启进程
+        writeLog(strmerge((const char *[]) {"进程崩溃! 开始重启进程!\n", "崩溃时间: ", time_str, NULL}));
+        execute_command("umount", point_path);
+        const  pid_t pid_ = fork();
+        if (pid_ == 0) {
+//            char *new_argv[] = {(char *)file_path, (char *)point_path, NULL};
+//            execvp(new_argv[0], new_argv);
+            execl(file_path, file_path, point_path, NULL);
+            writeLog(strmerge((const char *[]) {"重启进程失败\n", "重启时间: ", time_str, NULL}));
+            exit(EXIT_FAILURE);
+        } else if (pid_ < 0) {
+            // 创建子进程失败
+            writeLog("创建新进程失败\n");
+            fprintf(stderr, "创建新进程失败\n");
+            exit(EXIT_FAILURE);
+        }
+        asprintf((char **) &pid_str, "%d", pid_);
+        writeLog(strmerge((const char *[]) {"新进程pid: ", pid_str, "\n", "重启时间: ", time_str, NULL}));
+        fprintf(stderr, "新进程pid: %d\n", pid_);
+        if (!monitorPid) {
+            if (proc_pidpath(monitorPid, processName, sizeof(processName)) > 0) {
+                // 判断进程名是否为 "virtual_fs_monitor"
+                if (strcmp(processName, "virtual_fs_monitor") == 0) {
+                    kill(monitorPid, SIGTERM);
+                }
+            }
+        }
+        exit(EXIT_SUCCESS);
     }
 }
 
@@ -1052,6 +1089,8 @@ void *xmp_init(struct fuse_conn_info *conn) {
     // 设置 SIGTERM 信号的处理函数
     signal(SIGTERM, handle_sigterm);
     signal(SIGUSR1, handle_sigterm);
+    signal(SIGSEGV, handle_sigterm);
+    signal(SIGABRT, handle_sigterm);
 
     pid = getpid();
     writeLog(strmerge((const char *[]) {"挂载路径:", point_path,  NULL}));
@@ -1076,7 +1115,12 @@ void xmp_destroy(__attribute__((unused)) void *userdata) {
     close(dev_null_fd);                // 关闭/dev/null的文件描述符
     delete_empty_directory(point_path);// 删除空目录
     if (!monitorPid) {
-        kill(monitorPid, SIGTERM);                // 结束子进程
+        if (proc_pidpath(monitorPid, processName, sizeof(processName)) > 0) {
+            // 判断进程名是否为 "virtual_fs_monitor"
+            if (strcmp(processName, "virtual_fs_monitor") == 0) {
+                kill(monitorPid, SIGTERM);
+            }
+        }
     }
 }
 
@@ -1154,18 +1198,6 @@ static struct fuse_operations xmp_oper = {
 };
 
 int main(int argc, char *argv[]) {
-#ifdef DEBUG
-    fprintf(stderr, "编译使用fuse版本: %d\n", FUSE_USE_VERSION);
-    fprintf(stderr, "本地安装fuse版本: %d\n", FUSE_VERSION);
-    debug_fp = fopen(debugFilePath, "a");
-    fprintf(stderr, "⚠️警告: 已开启Debug日志记录!\n");
-    fprintf(debug_fp, "当前挂载路径: %s\n", argv[1]);
-    time(&current_time);
-    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
-             localtime(&current_time));
-    fprintf(debug_fp, "开始时间: %s\n", time_str);
-#endif
-
     boolean_t monitor = true;
 
     // 检查命令行参数数量
@@ -1232,31 +1264,42 @@ int main(int argc, char *argv[]) {
     }
 
     point_path = argv[1]; // 挂载路径
-//    file_path = argv[0]; // 文件路径
 
-start_run:;
+start_run:
+#ifdef DEBUG
+    fprintf(stderr, "编译使用fuse版本: %d\n", FUSE_USE_VERSION);
+    fprintf(stderr, "本地安装fuse版本: %d\n", FUSE_VERSION);
+    debug_fp = fopen(debugFilePath, "a");
+    fprintf(stderr, "⚠️警告: 已开启Debug日志记录!\n");
+    fprintf(debug_fp, "当前挂载路径: %s\n", point_path);
+    time(&current_time);
+    strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
+             localtime(&current_time));
+    fprintf(debug_fp, "开始时间: %s\n", time_str);
+#endif
+    file_path = argv[0]; // 文件路径
     // 判断路径是否为目录
     struct stat file_stat;
-    if (stat(argv[1], &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
-        fprintf(stderr, "⚠️警告: 路径: %s 不是一个目录\n", argv[1]);
+    if (stat(point_path, &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
+        fprintf(stderr, "⚠️警告: 路径: %s 不是一个目录\n", point_path);
         char *command_suffix = malloc(
                 strlen(
                         "tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") +
-                strlen(argv[1]) + 1);
+                strlen(point_path) + 1);
         if (execute_command("osascript -e", command_suffix)) {
             fprintf(stderr, "❌无法将文件移动到废纸篓,请手动处理.\n");
             exit(EXIT_FAILURE);
         }
-        //        tell application \"Finder\" to delete POSIX file \"argv[1]\"
+        //        tell application \"Finder\" to delete POSIX file \"point_path\"
         fprintf(stderr, "⚠️已自动将文件移动到废纸篓🗑️\n");
     }
     // 判断路径是否存在
-    if (access(argv[1], F_OK) == -1) {
-        if (mkdir(argv[1], 0777)) {
-            fprintf(stderr, "创建路径: %s 失败\n", argv[1]);
+    if (access(point_path, F_OK) == -1) {
+        if (mkdir(point_path, 0777)) {
+            fprintf(stderr, "创建路径: %s 失败\n", point_path);
             exit(EXIT_FAILURE);
         }
-        fprintf(stderr, "已创建路径: %s\n", argv[1]);
+        fprintf(stderr, "已创建路径: %s\n", point_path);
     }
 
     // 检查日志文件大小是否超过阈值
@@ -1269,29 +1312,10 @@ start_run:;
         monitorPid = fork();
 
         if (monitorPid == 0) {
-            char *new_argv[] = {NULL, NULL, argv[1], NULL};
+            char *new_argv[] = {NULL, (char *)point_path, NULL, (char *)NULL};
             // 构建新的 argv，将 argv[0] 加上 "_monitor"
-            new_argv[0] = malloc(strlen(argv[0]) + strlen("_monitor") + 1);
-            strcpy(new_argv[0], argv[0]);
-            strcat(new_argv[0], "_monitor");
-
-            // 设置 arg1 为 getpid() + 2
-            int pid_ = getpid() + 2;
-            int snprintf_result = snprintf(NULL, 0, "%d", pid_);
-            if (snprintf_result < 0) {
-                perror("snprintf");
-                return 1;
-            }
-            new_argv[1] = malloc(snprintf_result + 1);
-            if (new_argv[1] == NULL) {
-                perror("malloc");
-                return 1;
-            }
-            if (snprintf(new_argv[1], snprintf_result + 1, "%d", pid_) < 0) {
-                perror("snprintf");
-                free(new_argv[1]);
-                return 1;
-            }
+            new_argv[0] = strmerge((const char *[]) {file_path, "_monitor", NULL});
+            asprintf((char **) &new_argv[2], "%d", getpid() + 2);
 
             // 使用 execvp 执行指定路径的程序
             execvp(new_argv[0], new_argv);

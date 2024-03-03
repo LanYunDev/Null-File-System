@@ -29,8 +29,8 @@ typedef unsigned long u_long;
 #define MEMORY_THRESHOLD (15 * MEGABYTE)// 15MB
 
 #define MAX_LISTS 10     // stringLists数据结构的长度
-#define MAX_VISIT_COUNT 15// 最大访问次数
-#define TIME_LIMIT 30    // 时间限制
+#define MAX_VISIT_COUNT 10// 最大访问次数
+#define TIME_LIMIT 20    // 时间限制
 
 typedef struct {
     char *str;
@@ -191,6 +191,7 @@ char *strmerge(const char* strings[]) {
 // 动态添加黑名单函数
 unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
     FirstAccessCount = 0;// 重置访问次数
+
     if (dynamicBlackLists[10] == NULL) {
         // 异常情况:dynamicBlackLists[10]为空
         // 试图截取字符串前1/4长度作为黑名单路径特征
@@ -199,6 +200,7 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
         writeLog(strmerge((const char *[]) {"异常情况! dynamicBlackLists[10]为空!\n","input_str:",input_str,"\ndynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index], NULL}));
         return 1;
     }
+
     // 比较两个字符串
     unsigned short int diff_position;// 记录第一个不同的位置
     for (unsigned short int i = 0;; i++) {
@@ -215,19 +217,24 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
         writeLog(strmerge((const char *[]) {"异常情况! 起始路径不同!\n","input_str:",input_str,"\ndynamicBlackLists[10]:",dynamicBlackLists[10],"\ndynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index],NULL}));
         return 1;
     }
+
     // 将2个文件名相同部分截取出来,并存储
     if (dynamicBlackLists[index] != NULL) {
         free(dynamicBlackLists[index]);
     }
+
     dynamicBlackLists[index] = strdup(strncpy(malloc((diff_position + 1 + 1) * sizeof(char)), input_str, diff_position + 1));
     dynamicBlackLists[index][diff_position + 1] = '\0';// 实际是第 diff_position + 1 + 1 位
     sprintf(index_str, "%d", index);
     writeLog(strmerge((const char *[]) {"新增动态黑名单:\n","dynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index], NULL}));
+
     return 0;
 }
 
 // 判断字符串是否在动态黑名单中
 static unsigned short int isInDynamicBlackLists(const char *input_str) {
+
+
     if (!(memcmp(input_str, "JetBrains", 9))) { // JetBrains特殊处理
         return 0;
     }
@@ -332,6 +339,7 @@ unsigned short int endsWith(const char *str, int num_suffix, ...) {
 
 // 文件名判定规则
 static unsigned short int rule_filename(const char *path) {
+    // 以.开头的文件报错返回
     const char *filename = strrchr(path, '/');
     if (filename != NULL) {
         filename++;// 移动到文件名的第一个字符
@@ -526,10 +534,8 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
         if (blackMode) {
             if ((*path_plus == '.') ||
                 //                            arrayIncludes(blacklists, blacklists_size, (path + 1)) ||
-                rule_filename(path_plus) ||
-                arrayIncludes((const char **) dynamicBlackLists,
-                              ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1), path_plus) ||
-                isInDynamicBlackLists(path_plus)) {
+                rule_filename(path_plus)
+                ) {
                 return -ENOENT;
             }
         } else {
@@ -546,7 +552,10 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
             fprintf(debug_fp, "xmp_getattr 伪装为文件夹\n");
         }
     } else {
-        if (!isfileAccessed) {
+        if (!isfileAccessed ||
+            arrayIncludes((const char **) dynamicBlackLists,
+                                             ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1), path_plus) ||
+            isInDynamicBlackLists(path_plus)) {
             // 初次访问文件，返回文件不存在
             isfileAccessed = true;// 重置文件访问标志
             return -ENOENT;

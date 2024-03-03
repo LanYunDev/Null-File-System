@@ -83,7 +83,7 @@ static unsigned short int blackMode = 1;
 //static const size_t blacklists_size =
 //        sizeof(blacklists) / sizeof(blacklists[0]);
 
-static const char *whitelists[] = {"JetBrains"};
+static const char *whitelists[] = {};
 static const size_t whitelists_size =
         sizeof(whitelists) / sizeof(whitelists[0]);
 
@@ -97,6 +97,7 @@ static struct fuse_bufvec *read_null_buf;
 
 static time_t firstAccess_time = 0;
 static time_t current_time;
+static time_t lastAccess_time = 0;
 static char time_str[20];
 static const unsigned short int time_str_size = sizeof(time_str) / sizeof(time_str[0]);
 
@@ -120,6 +121,9 @@ typedef struct {
 
 // 哈希环
 static HashNode hashRing[HASH_RING_SIZE];
+
+static unsigned short int arrayIncludes(const char *array[], size_t size,
+                                        const char *target);
 
 // 计算路径的哈希值
 static unsigned int hashFunction(const char *string) {
@@ -233,13 +237,22 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
 
 // 判断字符串是否在动态黑名单中
 static unsigned short int isInDynamicBlackLists(const char *input_str) {
-
-
-    if (!(memcmp(input_str, "JetBrains", 9))) { // JetBrains特殊处理
-        return 0;
-    }
-    unsigned short int index = hashFunction(input_str);
     current_time = time(NULL);
+
+    for (size_t i = 0; i < ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1); ++i) {
+        if ((dynamicBlackLists[i] != NULL) && memcmp(dynamicBlackLists[i], input_str, strlen(dynamicBlackLists[i])) == 0) {
+            // 判断名单是否过期
+            if (current_time - lastAccess_time > TIME_LIMIT*3) {
+                // 过期,释放内存
+                free(dynamicBlackLists[i]);
+            } else {
+                lastAccess_time = current_time;
+                return 1;// 字符串数组中包含目标字符串
+            }
+        }
+    }
+
+    unsigned short int index = hashFunction(input_str);
 
     if (stringLists[index].str != NULL) {
         if (strcmp(stringLists[index].str, input_str) != 0) {
@@ -553,8 +566,6 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
         }
     } else {
         if (!isfileAccessed ||
-            arrayIncludes((const char **) dynamicBlackLists,
-                                             ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1), path_plus) ||
             isInDynamicBlackLists(path_plus)) {
             // 初次访问文件，返回文件不存在
             isfileAccessed = true;// 重置文件访问标志

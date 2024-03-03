@@ -186,7 +186,8 @@ SearchProcess:
     unsigned long memoryUsageMB;
     while (1) {
         if (proc_pidinfo(targetPid, PROC_PIDTASKINFO, 0, &taskInfo, sizeof(taskInfo)) <= 0) {
-            writeLog(strmerge((const char *[]) {"Failed to get process information,pid: ", pid_str, "\n"}));
+            asprintf((char **) &tmp_str1, "%d", targetPid);
+            writeLog(strmerge((const char *[]) {"Failed to get process information,pid: ", tmp_str1, "\n"}));
             perror("Failed to get process information");
             exit(EXIT_FAILURE);
         }

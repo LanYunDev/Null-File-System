@@ -80,6 +80,6 @@ Releases 默认仅适用于macOS arm64,其他平台请自行~~编译~~写代码(
 
 关于内存泄露,通过leaks工具可以看到存在内存泄露,例如`OS_xpc_pipe ObjC libxpc.dylib`等.
 
-内存泄露(大概率)不是由我写的代码引入的,而是原本就存在内存泄露的问题.
+内存泄露(大概率)不是由我写的代码引入的,而是原本就存在内存泄露的问题.[leaks from unclean exit in libfuse](https://github.com/macos-fuse-t/fuse-t/issues/52).
 
 由于某些情况下会出现内存泄露问题,故做了黑名单和监控程序等防止内存泄露并试图结束主程序.

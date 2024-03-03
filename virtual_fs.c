@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #if defined(_POSIX_C_SOURCE)
 typedef unsigned char u_char;
@@ -42,6 +43,8 @@ static StringInfo stringLists[MAX_LISTS];
 
 static unsigned short int FirstAccessCount = 0;// 计数动态变化的文件名
 static char *dynamicBlackLists[11] = {NULL};   // 存储动态黑名单
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; // 初始化互斥锁
 
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;
@@ -106,7 +109,7 @@ static char index_str[3] = {0};
 // 全局变量
 static pid_t pid;
 // 用于保存子进程pid
-static pid_t monitorPid;
+static pid_t monitorPid = 0;
 
 // 哈希环的长度
 enum {
@@ -121,10 +124,12 @@ enum {
 
 // 哈希环
 //static HashNode hashRing[HASH_RING_SIZE] = {NULL};
-static char *hashRing[HASH_RING_SIZE] = {NULL};
+static char *hashRing[HASH_RING_SIZE] = {NULL}; // 初始化哈希环
 
 static unsigned short int arrayIncludes(const char *array[], size_t size,
                                         const char *target);
+static unsigned short int endsWith(const char *str, int num_suffix, ...);
+static void safeFree(char **node);
 
 // 计算路径的哈希值
 static unsigned int hashFunction(const char *string) {
@@ -146,9 +151,7 @@ static bool pathExists(const char *string) {
 static void writePath(const char *string) {
     unsigned int index = hashFunction(string);
     if (hashRing[index] != NULL) {
-        // 覆盖已存在的路径
-        free(hashRing[index]);// 释放内存
-        hashRing[index] = NULL;
+        safeFree(&hashRing[index]);
     }
     // 分配内存并复制路径
     hashRing[index] = strdup(string);
@@ -158,8 +161,7 @@ static void writePath(const char *string) {
 static void freeHashRing() {
     for (int i = 0; i < HASH_RING_SIZE; i++) {
         if (hashRing[i] != NULL) {
-            free(hashRing[i]);
-            hashRing[i] = NULL;
+            safeFree(&hashRing[i]);
         }
     }
 }
@@ -195,6 +197,15 @@ char *strmerge(const char* strings[]) {
     return result;
 }
 
+static void safeFree(char **node) {
+    pthread_mutex_lock(&mutex);
+    if (*node != NULL) {
+        free(*node);// 释放内存
+        *node = NULL;
+    }
+    pthread_mutex_unlock(&mutex);
+}
+
 // 动态添加黑名单函数
 unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
     FirstAccessCount = 0;// 重置访问次数
@@ -209,8 +220,7 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
     }
 
     if (dynamicBlackLists[index] != NULL) {
-        free(dynamicBlackLists[index]);// 释放内存
-        dynamicBlackLists[index] = NULL;
+        safeFree(&dynamicBlackLists[index]);
     }
 
     // 比较两个字符串,将2个文件名相同部分截取出来,并存储
@@ -233,7 +243,10 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
     dynamicBlackLists[index] = strdup(strncpy(malloc((diff_position + 1 + 1) * sizeof(char)), input_str, diff_position + 1));
     dynamicBlackLists[index][diff_position + 1] = '\0';// 实际是第 diff_position + 1 + 1 位
     sprintf(index_str, "%d", index);
+//    if (isMemoryLeak) {}
+    #ifdef DEBUG
     writeLog(strmerge((const char *[]) {"新增动态黑名单:\n","dynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index], NULL}));
+    #endif
     lastAccess_time = time(NULL); // 初始化上次访问时间
 
     return 0;
@@ -241,14 +254,18 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
 
 // 判断字符串是否在动态黑名单中
 static unsigned short int isInDynamicBlackLists(const char *input_str) {
+    // 特殊规则处理
+    if (endsWith(input_str, 1, ".xlog")) {
+        return 0;
+    }
+
     current_time = time(NULL);
 
     for (size_t i = 0; i < ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1); ++i) {
         if ((dynamicBlackLists[i] != NULL) && memcmp(dynamicBlackLists[i], input_str, strlen(dynamicBlackLists[i])) == 0) {
             // 判断名单是否过期
             if (current_time - lastAccess_time > TIME_LIMIT*3) {
-                free(dynamicBlackLists[i]);// 释放内存
-                dynamicBlackLists[i] = NULL;
+                safeFree(&dynamicBlackLists[i]);
             } else {
                 lastAccess_time = current_time;
                 return 1;// 字符串数组中包含目标字符串
@@ -266,8 +283,7 @@ static unsigned short int isInDynamicBlackLists(const char *input_str) {
                 // 指向同一块内存
                 dynamicBlackLists[10] = NULL;
             }
-            free(stringLists[index].str);
-            stringLists[index].str = NULL;
+            safeFree((char **) &stringLists[index]);
             goto FirstAccess;
         }
 
@@ -329,7 +345,7 @@ static unsigned short int arrayIncludes(const char *array[], size_t size,
 }
 
 // 判断字符串是否以指定后缀结尾
-unsigned short int endsWith(const char *str, int num_suffix, ...) {
+static unsigned short int endsWith(const char *str, int num_suffix, ...) {
     size_t str_len = strlen(str);
     va_list suffix_list;
     va_start(suffix_list, num_suffix);
@@ -1006,6 +1022,37 @@ void *xmp_init(struct fuse_conn_info *conn) {
     FUSE_ENABLE_SETVOLNAME(conn);
     FUSE_ENABLE_XTIMES(conn);
 #endif
+
+    dev_null_fd = open("/dev/null", O_RDWR);
+    if (dev_null_fd == -1) {
+        fprintf(stderr, "Cannot open /dev/null: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // 初始化虚拟文件的状态信息
+    memset(&virtual_file_stat, 0, sizeof(struct stat));
+    virtual_file_stat.st_mode = S_IFREG | 0644;// 设置文件类型和权限
+    virtual_file_stat.st_nlink = 1;            // 设置硬链接数
+    virtual_file_stat.st_size = 0;             // 设置文件大小
+    virtual_file_stat.st_blocks = 0;           // 设置文件块数
+    virtual_file_stat.st_atime = virtual_file_stat.st_mtime =
+            virtual_file_stat.st_ctime = time(NULL);// 设置文件时间
+
+    read_null_buf = malloc(sizeof(struct fuse_bufvec));
+    if (read_null_buf == NULL) {
+        fprintf(stderr, "分配内存大小: %zu 失败\n", sizeof(struct fuse_bufvec));
+        perror("Error allocating memory");
+    }
+
+    // 初始化缓冲区
+    for (int i = 0; i < MAX_LISTS; i++) {
+        stringLists[i].str = NULL;
+    }
+
+    // 设置 SIGTERM 信号的处理函数
+    signal(SIGTERM, handle_sigterm);
+    signal(SIGUSR1, handle_sigterm);
+
     pid = getpid();
     writeLog(strmerge((const char *[]) {"挂载路径:", point_path,  NULL}));
     return NULL;
@@ -1019,16 +1066,18 @@ void xmp_destroy(__attribute__((unused)) void *userdata) {
     fprintf(debug_fp, "退出时间: %s\n", time_str);
     fclose(debug_fp);
 
-    for (int i = 0; i < MAX_LISTS; i++) {
-        free(stringLists[i].str);
-        free(dynamicBlackLists[i]);
-    }
-    free(dynamicBlackLists[10]);
+//    for (int i = 0; i < MAX_LISTS; i++) {
+//        free(stringLists[i].str);
+//        free(dynamicBlackLists[i]);
+//    }
+//    free(dynamicBlackLists[10]);
     freeHashRing();                    // 释放哈希环的内存
-    free(read_null_buf);               // 释放缓冲区的内存
+//    free(read_null_buf);               // 释放缓冲区的内存
     close(dev_null_fd);                // 关闭/dev/null的文件描述符
     delete_empty_directory(point_path);// 删除空目录
-    kill(monitorPid, SIGTERM);                // 结束子进程
+    if (!monitorPid) {
+        kill(monitorPid, SIGTERM);                // 结束子进程
+    }
 }
 
 #ifndef __APPLE__
@@ -1117,6 +1166,8 @@ int main(int argc, char *argv[]) {
     fprintf(debug_fp, "开始时间: %s\n", time_str);
 #endif
 
+    boolean_t monitor = true;
+
     // 检查命令行参数数量
     if (argc == 1) {
     usage_info:
@@ -1136,13 +1187,22 @@ int main(int argc, char *argv[]) {
             } else if (strcmp(argv[1], "-d") == 0) {
                 point_path = argv[2]; // 挂载路径
                 goto start_run;
+            } else if (strcmp(argv[1], "-no_monitor") == 0) {
+                monitor = false;
+                flag = 4;
             }
             argv[1] = argv[2];
             argc--;
         } else if (argc == 4) {
             if ((strcmp(argv[1], "-delete") == 0) &&
-                (strcmp(argv[1], "-disable_blackMode") == 0)) {
+                (strcmp(argv[2], "-disable_blackMode") == 0)) {
                 flag = 3;
+            } else if (strcmp(argv[1], "-d") == 0 && strcmp(argv[2], "-no_monitor") == 0) {
+                monitor = false;
+                point_path = argv[3]; // 挂载路径
+                argv[2] = argv[3];
+                argc--;
+                goto start_run;
             }
             argv[1] = argv[3];
             argc = argc - 2;
@@ -1159,6 +1219,8 @@ int main(int argc, char *argv[]) {
                 flag = execute_command("rm -rf", argv[1]);
                 blackMode = 0;
                 break;
+            case 4:
+                goto start_run;
             default:
                 goto usage_info;
         }
@@ -1202,86 +1264,51 @@ start_run:;
         exit(EXIT_FAILURE);
     }
 
-    // 启动子进程来监视内存使用情况,防止内存泄漏
-    monitorPid = fork();
+    if (monitor) {
+        // 启动子进程来监视内存使用情况,防止内存泄漏
+        monitorPid = fork();
 
-    if (monitorPid == 0) {
-        char *new_argv[] = {NULL, NULL, argv[1], NULL};
-        // 构建新的 argv，将 argv[0] 加上 "_monitor"
-        new_argv[0] = malloc(strlen(argv[0]) + strlen("_monitor") + 1);
-        strcpy(new_argv[0], argv[0]);
-        strcat(new_argv[0], "_monitor");
+        if (monitorPid == 0) {
+            char *new_argv[] = {NULL, NULL, argv[1], NULL};
+            // 构建新的 argv，将 argv[0] 加上 "_monitor"
+            new_argv[0] = malloc(strlen(argv[0]) + strlen("_monitor") + 1);
+            strcpy(new_argv[0], argv[0]);
+            strcat(new_argv[0], "_monitor");
 
-        // 设置 arg1 为 getpid() + 2
-        int pid_ = getpid() + 2;
-        int snprintf_result = snprintf(NULL, 0, "%d", pid_);
-        if (snprintf_result < 0) {
-            perror("snprintf");
-            return 1;
-        }
-        new_argv[1] = malloc(snprintf_result + 1);
-        if (new_argv[1] == NULL) {
-            perror("malloc");
-            return 1;
-        }
-        if (snprintf(new_argv[1], snprintf_result + 1, "%d", pid_) < 0) {
-            perror("snprintf");
+            // 设置 arg1 为 getpid() + 2
+            int pid_ = getpid() + 2;
+            int snprintf_result = snprintf(NULL, 0, "%d", pid_);
+            if (snprintf_result < 0) {
+                perror("snprintf");
+                return 1;
+            }
+            new_argv[1] = malloc(snprintf_result + 1);
+            if (new_argv[1] == NULL) {
+                perror("malloc");
+                return 1;
+            }
+            if (snprintf(new_argv[1], snprintf_result + 1, "%d", pid_) < 0) {
+                perror("snprintf");
+                free(new_argv[1]);
+                return 1;
+            }
+
+            // 使用 execvp 执行指定路径的程序
+            execvp(new_argv[0], new_argv);
+
+            // 如果 execvp 失败，打印错误信息
+            perror("execvp");
+            free(new_argv[0]);
             free(new_argv[1]);
             return 1;
+        } else if (monitorPid < 0) {
+            // 创建子进程失败
+            fprintf(stderr, "创建子进程失败\n");
+            exit(EXIT_FAILURE);
         }
-
-        // 使用 execvp 执行指定路径的程序
-        execvp(new_argv[0], new_argv);
-
-        // 如果 execvp 失败，打印错误信息
-        perror("execvp");
-        free(new_argv[0]);
-        free(new_argv[1]);
-        return 1;
-    } else if (monitorPid < 0) {
-        // 创建子进程失败
-        fprintf(stderr, "创建子进程失败\n");
-        exit(EXIT_FAILURE);
+        // 打印monitorPid
+        fprintf(stderr, "监控进程pid: %d\n", monitorPid);
     }
-    // 打印monitorPid
-    fprintf(stderr, "监控进程pid: %d\n", monitorPid);
-
-
-    dev_null_fd = open("/dev/null", O_RDWR);
-    if (dev_null_fd == -1) {
-        fprintf(stderr, "Cannot open /dev/null: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-
-    // 初始化虚拟文件的状态信息
-    memset(&virtual_file_stat, 0, sizeof(struct stat));
-    virtual_file_stat.st_mode = S_IFREG | 0644;// 设置文件类型和权限
-    virtual_file_stat.st_nlink = 1;            // 设置硬链接数
-    virtual_file_stat.st_size = 0;             // 设置文件大小
-    virtual_file_stat.st_blocks = 0;           // 设置文件块数
-    virtual_file_stat.st_atime = virtual_file_stat.st_mtime =
-            virtual_file_stat.st_ctime = time(NULL);// 设置文件时间
-
-    // 初始化哈希环
-    for (int i = 0; i < HASH_RING_SIZE; i++) {
-        hashRing[i] = NULL;
-    }
-
-    read_null_buf = malloc(sizeof(struct fuse_bufvec));
-    if (read_null_buf == NULL) {
-        fprintf(stderr, "分配内存大小: %zu 失败\n", sizeof(struct fuse_bufvec));
-        perror("Error allocating memory");
-        return 1;
-    }
-
-    // 初始化缓冲区
-    for (int i = 0; i < MAX_LISTS; i++) {
-        stringLists[i].str = NULL;
-    }
-
-    // 设置 SIGTERM 信号的处理函数
-    signal(SIGTERM, handle_sigterm);
-    signal(SIGUSR1, handle_sigterm);
 
     umask(0);
 

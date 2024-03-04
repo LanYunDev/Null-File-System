@@ -31,25 +31,30 @@ typedef unsigned long u_long;
 #define MEGABYTE (1024 * 1024)          // 1MB
 #define MEMORY_THRESHOLD (15 * MEGABYTE)// 15MB
 
-#define MAX_LISTS 10     // stringLists数据结构的长度
+#define MAX_LISTS 10      // stringLists数据结构的长度
 #define MAX_VISIT_COUNT 10// 最大访问次数
-#define TIME_LIMIT 20    // 时间限制
+#define TIME_LIMIT 20     // 时间限制
 
 typedef struct {
     char *str;
+    unsigned  short int len;
     unsigned short int visit_count;
     time_t first_visit_time;
 } StringInfo;
 
 static StringInfo stringLists[MAX_LISTS];
+pthread_mutex_t stringListsMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned short int FirstAccessCount = 0;// 计数动态变化的文件名
 static char *dynamicBlackLists[11] = {NULL};   // 存储动态黑名单
+static unsigned short int diff_position;// 记录第一个不同的位置
+static unsigned short int dynamicBlackLists_len[11] = {0};
+pthread_mutex_t dynamicBlackListsMutex = PTHREAD_MUTEX_INITIALIZER;// 初始化互斥锁
 
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
 
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; // 初始化互斥锁
+//pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;// 初始化互斥锁
 
 // 全局变量，用于存储/dev/null的文件描述符
 static int dev_null_fd;
@@ -71,6 +76,9 @@ static bool isfileAccessed = true;
 static const char *debugFilePath = "/tmp/fs_debug.log";
 static const char *Monitor_debugFilePath = "/tmp/fs_Memory.log";
 static const char *logFilePath = "/tmp/fs.log";
+static const char *umount_str;
+static char *mergedString = NULL;
+pthread_mutex_t mergedStringMutex = PTHREAD_MUTEX_INITIALIZER;// 初始化互斥锁
 
 static const size_t thresholdMB = 1;
 
@@ -94,6 +102,8 @@ static unsigned short int blackMode = 1;
 static const char *whitelists[] = {};
 static const size_t whitelists_size =
         sizeof(whitelists) / sizeof(whitelists[0]);
+
+unsigned short int isJetBrainPath = 0;
 
 static const char *special_lists[] = {"apache2"};
 static const size_t special_lists_size =
@@ -131,7 +141,8 @@ enum {
 
 // 哈希环
 //static HashNode hashRing[HASH_RING_SIZE] = {NULL};
-static char *hashRing[HASH_RING_SIZE] = {NULL}; // 初始化哈希环
+static char *hashRing[HASH_RING_SIZE] = {NULL};// 初始化哈希环
+pthread_mutex_t hashRingMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned short int arrayIncludes(const char *array[], size_t size,
                                         const char *target);
@@ -157,24 +168,24 @@ static bool pathExists(const char *string) {
 // 将路径写入哈希环中，覆盖已存在的路径
 static void writePath(const char *string) {
     unsigned int index = hashFunction(string);
-    if (hashRing[index] != NULL) {
+    if (strcmp(string, hashRing[index]) != 0) {
+        pthread_mutex_lock(&hashRingMutex);
         safeFree(&hashRing[index]);
+        // 分配内存并复制路径
+        hashRing[index] = strdup(string);
+        pthread_mutex_unlock(&hashRingMutex);
     }
-    // 分配内存并复制路径
-    hashRing[index] = strdup(string);
 }
 
 // 释放哈希环的内存
 static void freeHashRing() {
     for (int i = 0; i < HASH_RING_SIZE; i++) {
-        if (hashRing[i] != NULL) {
-            safeFree(&hashRing[i]);
-        }
+        safeFree(&hashRing[i]);
     }
 }
 
 // 向日志文件中输入内容函数
-unsigned short int writeLog(const char *logContent) {
+static unsigned short int writeLog(const char *logContent) {
     FILE *log_fp = fopen(logFilePath, "a");
     if (log_fp == NULL) {
         perror("Filed to open log file\n");
@@ -182,58 +193,81 @@ unsigned short int writeLog(const char *logContent) {
     }
     fprintf(log_fp, "\n%d: %s", pid, logContent);
     fclose(log_fp);
+    if (logContent == mergedString) {
+        pthread_mutex_lock(&mergedStringMutex);
+        safeFree(&mergedString);
+        pthread_mutex_unlock(&mergedStringMutex);
+    }
     return 0;
 }
 
 // 合并多个字符串函数
-char *strmerge(const char* strings[]) {
-    size_t total_length = 0; // 计算总长度
+static char *strmerge(const char *strings[]) {
+    size_t total_length = 0;// 计算总长度
     for (size_t i = 0; strings[i] != NULL; i++) {
         total_length += strlen(strings[i]);
     }
-    char *result = (char *) malloc(total_length + 1); // +1 用于存储字符串结束符 '\0'
-    if (result == NULL) {
+    pthread_mutex_lock(&mergedStringMutex);
+    mergedString = (char *) malloc(total_length + 1);// +1 用于存储字符串结束符 '\0'
+    if (mergedString == NULL) {
         perror("Memory allocation failed\n");
         writeLog("Memory allocation failed\n");
         return NULL;
     }
-    result[0] = '\0'; // 确保开始为空字符串
+    mergedString[0] = '\0';// 确保开始为空字符串
     for (size_t i = 0; strings[i] != NULL; i++) {
-        strcat(result, strings[i]);
+        strcat(mergedString, strings[i]);
     }
-    return result;
+    pthread_mutex_unlock(&mergedStringMutex);
+    return mergedString;
 }
 
 static void safeFree(char **node) {
-    pthread_mutex_lock(&mutex);
+//    pthread_mutex_lock(&mutex);
     if (*node != NULL) {
         free(*node);// 释放内存
         *node = NULL;
     }
-    pthread_mutex_unlock(&mutex);
+//    pthread_mutex_unlock(&mutex);
 }
 
 // 动态添加黑名单函数
-unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
+static void handleAddDynamicBlackLists(unsigned short int index, const char *input_str) {
+    dynamicBlackLists[index] = malloc((dynamicBlackLists_len[index] + 1 + 1) * sizeof(char));
+    strncpy(dynamicBlackLists[index], input_str, dynamicBlackLists_len[index] + 1);
+    dynamicBlackLists[index][dynamicBlackLists_len[index] + 1] = '\0';
+}
+static unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
     FirstAccessCount = 0;// 重置访问次数
 
     if (dynamicBlackLists[10] == NULL) {
         // 异常情况:dynamicBlackLists[10]为空
-        // 试图截取字符串前1/4长度作为黑名单路径特征
-        dynamicBlackLists[index] = strdup(strncpy(malloc(strlen(input_str) / 4 + 1), input_str, strlen(input_str) / 4));
+        // 试图截取字符串前1/2长度作为黑名单路径特征
+        dynamicBlackLists_len[index] = strlen(input_str) / 2;
+        handleAddDynamicBlackLists(index, input_str);
         sprintf(index_str, "%d", index);
-        writeLog(strmerge((const char *[]) {"异常情况! dynamicBlackLists[10]为空!\n","input_str:",input_str,"\ndynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index], NULL}));
+        writeLog(strmerge((const char *[]){"异常情况! dynamicBlackLists[10]为空!\n", "input_str:", input_str, "\ndynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
         return 1;
     }
 
     if (dynamicBlackLists[index] != NULL) {
-        safeFree(&dynamicBlackLists[index]);
+        //        if (strncmp(dynamicBlackLists[index], input_str, strlen(dynamicBlackLists[index])) == 0) {
+        if (dynamicBlackLists_len[index] != 0 && memcmp(dynamicBlackLists[index], input_str, dynamicBlackLists_len[index]) == 0) {
+            // 字符串相同,更新上次访问时间
+            lastAccess_time = time(NULL);
+            return 0;
+        } else {
+            // 字符串不同,释放内存
+            pthread_mutex_lock(&dynamicBlackListsMutex);
+            safeFree(&dynamicBlackLists[index]);
+            dynamicBlackLists_len[index] = 0;
+            pthread_mutex_unlock(&dynamicBlackListsMutex);
+        }
     }
 
     // 比较两个字符串,将2个文件名相同部分截取出来,并存储
-    unsigned short int diff_position;// 记录第一个不同的位置
     for (unsigned short int i = 0;; i++) {
-        if (input_str[i] != dynamicBlackLists[10][i] ||  input_str[i] == '\0' || dynamicBlackLists[10][i] == '\0') {
+        if (input_str[i] != dynamicBlackLists[10][i] || input_str[i] == '\0' || dynamicBlackLists[10][i] == '\0') {
             diff_position = i;
             break;
         }
@@ -241,20 +275,21 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
 
     if (diff_position == 0) {
         // 起始路径不同,遇到这种情况可以做特殊处理,目前没想好怎么处理,先拒绝好了
-        dynamicBlackLists[index] = strdup(strncpy(malloc(strlen(input_str) / 4 + 1), input_str, strlen(input_str) / 4));
+        dynamicBlackLists_len[index] = strlen(input_str) / 2;
+        handleAddDynamicBlackLists(index, input_str);
         sprintf(index_str, "%d", index);
-        writeLog(strmerge((const char *[]) {"异常情况! 起始路径不同!\n","input_str:",input_str,"\ndynamicBlackLists[10]:",dynamicBlackLists[10],"\ndynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index],NULL}));
+        writeLog(strmerge((const char *[]){"异常情况! 起始路径不同!\n", "input_str:", input_str, "\ndynamicBlackLists[10]:", dynamicBlackLists[10], "\ndynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
         return 1;
     }
 
-    dynamicBlackLists[index] = strdup(strncpy(malloc((diff_position + 1 + 1) * sizeof(char)), input_str, diff_position + 1));
-    dynamicBlackLists[index][diff_position + 1] = '\0';// 实际是第 diff_position + 1 + 1 位
+    dynamicBlackLists_len[index] = diff_position;
+    handleAddDynamicBlackLists(index, input_str);
+    //    if (isMemoryLeak) {}
+#ifdef DEBUG
     sprintf(index_str, "%d", index);
-//    if (isMemoryLeak) {}
-    #ifdef DEBUG
-    writeLog(strmerge((const char *[]) {"新增动态黑名单:\n","dynamicBlackLists[",  index_str, "]:",dynamicBlackLists[index], NULL}));
-    #endif
-    lastAccess_time = time(NULL); // 初始化上次访问时间
+    writeLog(strmerge((const char *[]){"新增动态黑名单:\n", "dynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
+#endif
+    lastAccess_time = time(NULL);// 初始化上次访问时间
 
     return 0;
 }
@@ -262,17 +297,20 @@ unsigned short int AddDynamicBlackLists(unsigned short int index, const char *in
 // 判断字符串是否在动态黑名单中
 static unsigned short int isInDynamicBlackLists(const char *input_str) {
     // 特殊规则处理
-    if (endsWith(input_str, 1, ".xlog")) {
+    if (isJetBrainPath || endsWith(input_str, 1, "xlog")) {
         return 0;
     }
 
     current_time = time(NULL);
 
     for (size_t i = 0; i < ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1); ++i) {
-        if ((dynamicBlackLists[i] != NULL) && memcmp(dynamicBlackLists[i], input_str, strlen(dynamicBlackLists[i])) == 0) {
+        if ((dynamicBlackLists[i] != NULL) && dynamicBlackLists_len[i] != 0 && memcmp(dynamicBlackLists[i], input_str, dynamicBlackLists_len[i]) == 0) { // 存在不相同内容
             // 判断名单是否过期
-            if (current_time - lastAccess_time > TIME_LIMIT*3) {
+            if (current_time - lastAccess_time > TIME_LIMIT * 3) {
+                pthread_mutex_lock(&dynamicBlackListsMutex);
                 safeFree(&dynamicBlackLists[i]);
+                dynamicBlackLists_len[i] = 0;
+                pthread_mutex_unlock(&dynamicBlackListsMutex);
             } else {
                 lastAccess_time = current_time;
                 return 1;// 字符串数组中包含目标字符串
@@ -283,14 +321,19 @@ static unsigned short int isInDynamicBlackLists(const char *input_str) {
     unsigned short int index = hashFunction(input_str);
 
     if (stringLists[index].str != NULL) {
-        if (strcmp(stringLists[index].str, input_str) != 0) {
+//        if (strcmp(stringLists[index].str, input_str) != 0) {
+        if (memcmp(stringLists[index].str, input_str, stringLists[index].len) != 0) {
             // 不相同字符串,但相同index
             // 注意此处可能会释放掉dynamicBlackLists[10]指向的内存块
+            pthread_mutex_lock(&stringListsMutex);
+            pthread_mutex_lock(&dynamicBlackListsMutex);
             if (stringLists[index].str == dynamicBlackLists[10]) {
                 // 指向同一块内存
                 dynamicBlackLists[10] = NULL;
             }
             safeFree((char **) &stringLists[index]);
+            pthread_mutex_unlock(&dynamicBlackListsMutex);
+            pthread_mutex_unlock(&stringListsMutex);
             goto FirstAccess;
         }
 
@@ -325,6 +368,7 @@ static unsigned short int isInDynamicBlackLists(const char *input_str) {
         }
 
         stringLists[index].str = dynamicBlackLists[10] = strdup(input_str);
+        stringLists[index].len = strlen(input_str);
         stringLists[index].visit_count = 1;
         stringLists[index].first_visit_time = time(NULL);
         return 0;
@@ -407,19 +451,18 @@ static unsigned short int is_directory(const char *path) {
         if (suffix != NULL) {
             suffix++;// 移动到后缀的第一个字符
 
-            static unsigned short int JetBrain_path;
             if (blackMode) {
-                JetBrain_path = (!(memcmp((path + 1), "JetBrains", 9)));
+                isJetBrainPath = (!(memcmp((path + 1), "JetBrains", 9)));
             } else {
-                JetBrain_path = 1;
+                isJetBrainPath = 1;
             }
-            //            const unsigned short int JetBrain_path = (!(strcmp( (path +
+            //            const unsigned short int isJetBrainPath = (!(strcmp( (path +
             //            1), "JetBrains")));
             if ((*suffix < '0' || *suffix > '9') ||
-                (JetBrain_path && ((suffix[-4] == 'c') && (suffix[-3] == 's') &&
-                                   (suffix[-2] == 'v')))) {// 匹配JB中.csv.0 文件
+                (isJetBrainPath && ((suffix[-4] == 'c') && (suffix[-3] == 's') &&
+                                    (suffix[-2] == 'v')))) {// 匹配JB中.csv.0 文件
                 // 针对jetbrains的文件进行特殊处理
-                if (JetBrain_path && !endsWith(filename, 2, ".log", ".txt")) {
+                if (isJetBrainPath && !endsWith(filename, 2, ".log", ".txt")) {
                     filename++;// 移动到文件名的第一个字符
                     if (!pathExists(filename)) {
                         // 哈希环中不存在该文件名
@@ -438,30 +481,32 @@ static unsigned short int is_directory(const char *path) {
     return 1;
 }
 
-static unsigned short int execute_command(const char *command_prefix,
-                                          const char *command_suffix) {
+static unsigned short int execute_command(const char *command) {
     // 计算需要的内存大小，包括命令字符串和终结符 '\0'
-    size_t command_size =
-            strlen(command_suffix) + strlen(command_prefix) +
-            5;// 2个双引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
-
-    // 检查内存大小是否超过限制
-    if (command_size > 1 * 1024 * 1024 * 1024) {
-        fprintf(stderr, "Memory allocation size exceeds limit (1GB)\n");
-        return 1;
-    }
-
-    // 分配足够的内存
-    char *command = (char *) malloc(command_size);
-
-    if (command == NULL) {
-        fprintf(stderr, "分配内存大小: %zu 失败\n", command_size);
-        perror("Error allocating memory");
-        return 1;
-    }
-
-    // 构建删除命令并执行
-    snprintf(command, command_size, "%s \"%s\"", command_prefix, command_suffix);
+//    size_t command_size =
+//            strlen(command_suffix) + strlen(command_prefix) +
+//            5;// 2个双引号加上一个空格长度为 3，额外留两个字符给目录路径和终结符 '\0'
+//
+//    // 检查内存大小是否超过限制
+//    if (command_size > 1 * 1024 * 1024 * 1024) {
+//        fprintf(stderr, "Memory allocation size exceeds limit (1GB)\n");
+//        return 1;
+//    }
+//
+//    // 分配足够的内存
+//    char *command = (char *) malloc(command_size);
+//
+//    if (command == NULL) {
+//        fprintf(stderr, "分配内存大小: %zu 失败\n", command_size);
+//        perror("Error allocating memory");
+//        return 1;
+//    }
+//
+//    // 构建删除命令并执行
+//    snprintf(command, command_size, "%s \"%s\"", command_prefix, command_suffix);
+    FILE *log_fp = fopen(logFilePath, "a");
+    fprintf(log_fp, "\n%d: 执行命令: %s", pid, command);
+    fclose(log_fp);
     fprintf(stderr, "执行命令: %s\n", command);
 
     // 提示用户确认,都带上参数了,就没必要了.
@@ -478,7 +523,12 @@ static unsigned short int execute_command(const char *command_prefix,
     unsigned short int ret = system(command);
 
     // 释放动态分配的内存
-    free(command);
+//    free(command);
+    if (mergedString != NULL) {
+        pthread_mutex_lock(&mergedStringMutex);
+        safeFree(&mergedString);
+        pthread_mutex_unlock(&mergedStringMutex);
+    }
 
     return ret;
 }
@@ -503,15 +553,18 @@ static unsigned short int fileSizeCheck(const char *filePath) {
 static unsigned short int logFileCheck(const char *filePath, const char *description) {
     if (fileSizeCheck(filePath)) {
         fprintf(stderr, "⚠️警告: %s日志文件大小超过阈值: %zu MB\n", description, thresholdMB);
-        size_t command_size = strlen("tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") + strlen(filePath) + 1;
-        char *command_suffix = malloc(command_size);
-        snprintf(command_suffix, command_size, "%s \\\"%s\\\"", "tell application \\\"Finder\\\" to delete POSIX file", filePath);
+//        size_t command_size = strlen("tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") + strlen(filePath) + 1;
+//        char *command_suffix = malloc(command_size);
+//        snprintf(command_suffix, command_size, "%s \\\"%s\\\"", "tell application \\\"Finder\\\" to delete POSIX file", filePath);
 
-        if (execute_command("osascript -e", command_suffix)) {
+//        if (execute_command("osascript -e", command_suffix)) {
+        if (execute_command(strmerge((const char *[]){"osascript -e ", "'tell application \"Finder\" to delete POSIX file \"", filePath, "\"'", NULL}))) {
+            writeLog(strmerge((const char *[]){"❌无法将文件移动到废纸篓,请手动处理.\n", "文件路径: ", filePath, NULL}));
             fprintf(stderr, "❌无法将文件移动到废纸篓,请手动处理.\n");
             return 1;
         }
         //        tell application \"Finder\" to delete POSIX file \"point_path\"
+        writeLog(strmerge((const char *[]){"⚠️已自动将文件移动到废纸篓🗑️\n", "文件路径: ", filePath, NULL}));
         fprintf(stderr, "⚠️已自动将文件移动到废纸篓🗑️\n");
     }
     return 0;
@@ -521,10 +574,11 @@ static void handle_sigterm(int signum) {
     time(&current_time);
     strftime(time_str, time_str_size, "%Y-%m-%d %H:%M:%S",
              localtime(&current_time));
+    writeLog(strmerge((const char *[]){"主进程收到信号: ", strsignal(signum), "\n","时间: ", time_str, NULL}));
     if (signum == SIGTERM) {
         //        printf("Received SIGTERM signal. Performing cleanup...\n");
-        writeLog(strmerge((const char *[]) {"Received SIGTERM signal. Performing cleanup...\n", "退出时间: ", time_str, NULL}));
-        execute_command("umount", point_path);
+//        writeLog(strmerge((const char *[]){"Received SIGTERM signal. Performing cleanup...\n", "退出时间: ", time_str, NULL}));
+        execute_command(strmerge((const char *[]){"umount ", point_path, NULL}));
         exit(EXIT_SUCCESS);
     } else if (signum == SIGUSR1) {
         //     debug,打印信息到文件
@@ -535,14 +589,13 @@ static void handle_sigterm(int signum) {
         isMemoryLeak = true;
     } else if (signum == SIGSEGV || signum == SIGABRT) {
         // 进程崩溃,重启进程
-        writeLog(strmerge((const char *[]) {"进程崩溃! 开始重启进程!\n", "崩溃时间: ", time_str, NULL}));
-        execute_command("umount", point_path);
-        const  pid_t pid_ = fork();
+        writeLog(strmerge((const char *[]){"主进程崩溃! 开始重启!\n", "崩溃时间: ", time_str, NULL}));
+        const pid_t pid_ = fork();
         if (pid_ == 0) {
-//            char *new_argv[] = {(char *)file_path, (char *)point_path, NULL};
-//            execvp(new_argv[0], new_argv);
+            //            char *new_argv[] = {(char *)file_path, (char *)point_path, NULL};
+            //            execvp(new_argv[0], new_argv);
             execl(file_path, file_path, point_path, NULL);
-            writeLog(strmerge((const char *[]) {"重启进程失败\n", "重启时间: ", time_str, NULL}));
+            writeLog(strmerge((const char *[]){"重启主进程失败\n", "重启时间: ", time_str, NULL}));
             exit(EXIT_FAILURE);
         } else if (pid_ < 0) {
             // 创建子进程失败
@@ -551,7 +604,7 @@ static void handle_sigterm(int signum) {
             exit(EXIT_FAILURE);
         }
         asprintf((char **) &pid_str, "%d", pid_);
-        writeLog(strmerge((const char *[]) {"新进程pid: ", pid_str, "\n", "重启时间: ", time_str, NULL}));
+        writeLog(strmerge((const char *[]){"新主进程pid: ", pid_str, "\n", "重启时间: ", time_str, NULL}));
         fprintf(stderr, "新进程pid: %d\n", pid_);
         if (!monitorPid) {
             if (proc_pidpath(monitorPid, processName, sizeof(processName)) > 0) {
@@ -599,7 +652,7 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
     //    获取指定路径的文件或目录的属性
 
     if (isMemoryLeak) {
-        fprintf(debug_fp, "%d:xmp_getattr path: %s\n",pid, path);
+        fprintf(debug_fp, "%d:xmp_getattr path: %s\n", pid, path);
     }
 
     // 黑名单
@@ -608,8 +661,7 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
         if (blackMode) {
             if ((*path_plus == '.') ||
                 //                            arrayIncludes(blacklists, blacklists_size, (path + 1)) ||
-                rule_filename(path_plus)
-                ) {
+                rule_filename(path_plus)) {
                 return -ENOENT;
             }
         } else {
@@ -653,9 +705,9 @@ static int xmp_fgetattr(__attribute__((unused)) const char *path,
     }
     // 黑名单
     if (blackMode) {
-//        if (arrayIncludes(blacklists, blacklists_size, (path + 1))) {
-//            return -ENOENT;
-//        }
+        //        if (arrayIncludes(blacklists, blacklists_size, (path + 1))) {
+        //            return -ENOENT;
+        //        }
     } else {
         if (!(*(path + 1)) ||
             !arrayIncludes(whitelists, whitelists_size, (path + 1))) {
@@ -1093,7 +1145,7 @@ void *xmp_init(struct fuse_conn_info *conn) {
     signal(SIGABRT, handle_sigterm);
 
     pid = getpid();
-    writeLog(strmerge((const char *[]) {"挂载路径:", point_path,  NULL}));
+    writeLog(strmerge((const char *[]){"挂载路径:", point_path, NULL}));
     return NULL;
 }
 
@@ -1105,13 +1157,13 @@ void xmp_destroy(__attribute__((unused)) void *userdata) {
     fprintf(debug_fp, "退出时间: %s\n", time_str);
     fclose(debug_fp);
 
-//    for (int i = 0; i < MAX_LISTS; i++) {
-//        free(stringLists[i].str);
-//        free(dynamicBlackLists[i]);
-//    }
-//    free(dynamicBlackLists[10]);
+    //    for (int i = 0; i < MAX_LISTS; i++) {
+    //        free(stringLists[i].str);
+    //        free(dynamicBlackLists[i]);
+    //    }
+    //    free(dynamicBlackLists[10]);
     freeHashRing();                    // 释放哈希环的内存
-//    free(read_null_buf);               // 释放缓冲区的内存
+                                       //    free(read_null_buf);               // 释放缓冲区的内存
     close(dev_null_fd);                // 关闭/dev/null的文件描述符
     delete_empty_directory(point_path);// 删除空目录
     if (!monitorPid) {
@@ -1217,7 +1269,7 @@ int main(int argc, char *argv[]) {
             } else if (strcmp(argv[1], "-disable_blackMode") == 0) {
                 flag = 2;
             } else if (strcmp(argv[1], "-d") == 0) {
-                point_path = argv[2]; // 挂载路径
+                point_path = argv[2];// 挂载路径
                 goto start_run;
             } else if (strcmp(argv[1], "-no_monitor") == 0) {
                 monitor = false;
@@ -1231,7 +1283,7 @@ int main(int argc, char *argv[]) {
                 flag = 3;
             } else if (strcmp(argv[1], "-d") == 0 && strcmp(argv[2], "-no_monitor") == 0) {
                 monitor = false;
-                point_path = argv[3]; // 挂载路径
+                point_path = argv[3];// 挂载路径
                 argv[2] = argv[3];
                 argc--;
                 goto start_run;
@@ -1241,14 +1293,14 @@ int main(int argc, char *argv[]) {
         }
         switch (flag) {
             case 1:
-                flag = execute_command("rm -rf", argv[1]);
+                flag = execute_command(strmerge((const char *[]){"rm -rf ", argv[1], NULL}));
                 break;
             case 2:
                 flag = 0;
                 blackMode = 0;
                 break;
             case 3:
-                flag = execute_command("rm -rf", argv[1]);
+                flag = execute_command(strmerge((const char *[]){"rm -rf ", argv[1], NULL}));
                 blackMode = 0;
                 break;
             case 4:
@@ -1263,7 +1315,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    point_path = argv[1]; // 挂载路径
+    point_path = argv[1];// 挂载路径
 
 start_run:
 #ifdef DEBUG
@@ -1277,16 +1329,34 @@ start_run:
              localtime(&current_time));
     fprintf(debug_fp, "开始时间: %s\n", time_str);
 #endif
-    file_path = argv[0]; // 文件路径
+    file_path = argv[0];// 文件路径
+    pid = getpid();
+
+    umount_str = strmerge((const char *[]){"mount | grep \"", point_path, "\" | grep \"fuse-t\"", NULL});
+    if (!system(umount_str)) {
+        // 挂载路径已被使用
+        execute_command(strmerge((const char *[]){"umount ", point_path, NULL}));
+        sleep(3);
+        if (!system(umount_str)) {
+            execute_command(strmerge((const char *[]){"diskutil umount force ", point_path, NULL})); // 强制卸载挂载路径
+            sleep(3);
+            if (!system(umount_str)) {
+                fprintf(stderr, "❌挂载路径: %s 已被占用,请手动处理!\n", point_path);
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+
     // 判断路径是否为目录
     struct stat file_stat;
     if (stat(point_path, &file_stat) == 0 && !S_ISDIR(file_stat.st_mode)) {
         fprintf(stderr, "⚠️警告: 路径: %s 不是一个目录\n", point_path);
-        char *command_suffix = malloc(
-                strlen(
-                        "tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") +
-                strlen(point_path) + 1);
-        if (execute_command("osascript -e", command_suffix)) {
+//        char *command_suffix = malloc(
+//                strlen(
+//                        "tell application \\\"Finder\\\" to delete POSIX file \\\"\\\"") +
+//                strlen(point_path) + 1);
+//        if (execute_command("osascript -e", command_suffix)) {
+        if (execute_command(strmerge((const char *[]){"osascript -e ", "'tell application \"Finder\" to delete POSIX file \"", point_path, "\"'", NULL}))) {
             fprintf(stderr, "❌无法将文件移动到废纸篓,请手动处理.\n");
             exit(EXIT_FAILURE);
         }
@@ -1303,7 +1373,9 @@ start_run:
     }
 
     // 检查日志文件大小是否超过阈值
-    if (logFileCheck(Monitor_debugFilePath, "监控程序") || logFileCheck(debugFilePath, "主程序Debug")) {
+    if (
+            logFileCheck(Monitor_debugFilePath, "监控程序") ||
+            logFileCheck(debugFilePath, "主程序Debug")) {
         exit(EXIT_FAILURE);
     }
 
@@ -1312,10 +1384,15 @@ start_run:
         monitorPid = fork();
 
         if (monitorPid == 0) {
-            char *new_argv[] = {NULL, (char *)point_path, NULL, (char *)NULL};
+            char *new_argv[] = {NULL, (char *) point_path, NULL, NULL, NULL};
+            if (strcmp(argv[1], "-d") == 0) {
+                asprintf((char **) &new_argv[2], "%d", getpid() - 2);
+                new_argv[3] = "-d";
+            } else {
+                asprintf((char **) &new_argv[2], "%d", getpid() + 2);
+            }
             // 构建新的 argv，将 argv[0] 加上 "_monitor"
-            new_argv[0] = strmerge((const char *[]) {file_path, "_monitor", NULL});
-            asprintf((char **) &new_argv[2], "%d", getpid() + 2);
+            new_argv[0] = strmerge((const char *[]){file_path, "_monitor", NULL});
 
             // 使用 execvp 执行指定路径的程序
             execvp(new_argv[0], new_argv);

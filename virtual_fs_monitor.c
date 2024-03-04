@@ -270,7 +270,7 @@ SearchProcess:
             sendCollectLogSignal = 1;
             kill(targetPid, SIGUSR1);// 发送收集日志信号
         } else if (
-                logFileCheck(logFilePath, "virtual_fs日志") ||
+//                logFileCheck(logFilePath, "virtual_fs日志") ||
                 logFileCheck(Main_debugFilePath, "主程序Debug")) {
             FILE *fp = fopen(debugFilePath, "a");
             time(&current_time);

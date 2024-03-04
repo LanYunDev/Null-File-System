@@ -12,7 +12,7 @@
 #include <libproc.h>
 #include <pthread.h>
 #include <signal.h>
-#include <stdarg.h>
+//#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,8 +32,8 @@ typedef unsigned long u_long;
 #define MEMORY_THRESHOLD (15 * MEGABYTE)// 15MB
 
 #define MAX_LISTS 10      // stringLists数据结构的长度
-#define MAX_VISIT_COUNT 10// 最大访问次数
-#define TIME_LIMIT 20     // 时间限制
+//#define MAX_VISIT_COUNT 10// 最大访问次数
+//#define TIME_LIMIT 20     // 时间限制
 
 typedef struct {
     char *str;
@@ -43,13 +43,13 @@ typedef struct {
 } StringInfo;
 
 static StringInfo stringLists[MAX_LISTS];
-pthread_mutex_t stringListsMutex = PTHREAD_MUTEX_INITIALIZER;
+//pthread_mutex_t stringListsMutex = PTHREAD_MUTEX_INITIALIZER;
 
-static unsigned short int FirstAccessCount = 0;// 计数动态变化的文件名
-static char *dynamicBlackLists[11] = {NULL};   // 存储动态黑名单
-static unsigned short int diff_position;// 记录第一个不同的位置
-static unsigned short int dynamicBlackLists_len[11] = {0};
-pthread_mutex_t dynamicBlackListsMutex = PTHREAD_MUTEX_INITIALIZER;// 初始化互斥锁
+//static unsigned short int FirstAccessCount = 0;// 计数动态变化的文件名
+//static char *dynamicBlackLists[11] = {NULL};   // 存储动态黑名单
+//static unsigned short int diff_position;// 记录第一个不同的位置
+//static unsigned short int dynamicBlackLists_len[11] = {0};
+//pthread_mutex_t dynamicBlackListsMutex = PTHREAD_MUTEX_INITIALIZER;// 初始化互斥锁
 
 // 获取指定 pid 进程的名称
 static char processName[PROC_PIDPATHINFO_MAXSIZE];
@@ -113,13 +113,13 @@ static const size_t special_lists_size =
 // 全局变量，用于保存读取的数据
 static struct fuse_bufvec *read_null_buf;
 
-static time_t firstAccess_time = 0;
+//static time_t firstAccess_time = 0;
 static time_t current_time;
-static time_t lastAccess_time;
+//static time_t lastAccess_time;
 static char time_str[20];
 static const unsigned short int time_str_size = sizeof(time_str) / sizeof(time_str[0]);
 
-static char index_str[3] = {0};
+//static char index_str[3] = {0};
 
 // 全局变量
 static pid_t pid;
@@ -146,7 +146,7 @@ pthread_mutex_t hashRingMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static unsigned short int arrayIncludes(const char *array[], size_t size,
                                         const char *target);
-static unsigned short int endsWith(const char *str, int num_suffix, ...);
+//static unsigned short int endsWith(const char *str, int num_suffix, ...);
 static void safeFree(char **node);
 
 // 计算路径的哈希值
@@ -232,148 +232,150 @@ static void safeFree(char **node) {
 }
 
 // 动态添加黑名单函数
-static void handleAddDynamicBlackLists(unsigned short int index, const char *input_str) {
-    dynamicBlackLists[index] = malloc((dynamicBlackLists_len[index] + 1 + 1) * sizeof(char));
-    strncpy(dynamicBlackLists[index], input_str, dynamicBlackLists_len[index] + 1);
-    dynamicBlackLists[index][dynamicBlackLists_len[index] + 1] = '\0';
-}
-static unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
-    FirstAccessCount = 0;// 重置访问次数
-
-    if (dynamicBlackLists[10] == NULL) {
-        // 异常情况:dynamicBlackLists[10]为空
-        // 试图截取字符串前1/2长度作为黑名单路径特征
-        dynamicBlackLists_len[index] = strlen(input_str) / 2;
-        handleAddDynamicBlackLists(index, input_str);
-        sprintf(index_str, "%d", index);
-        writeLog(strmerge((const char *[]){"异常情况! dynamicBlackLists[10]为空!\n", "input_str:", input_str, "\ndynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
-        return 1;
-    }
-
-    if (dynamicBlackLists[index] != NULL) {
-        //        if (strncmp(dynamicBlackLists[index], input_str, strlen(dynamicBlackLists[index])) == 0) {
-        if (dynamicBlackLists_len[index] != 0 && memcmp(dynamicBlackLists[index], input_str, dynamicBlackLists_len[index]) == 0) {
-            // 字符串相同,更新上次访问时间
-            lastAccess_time = time(NULL);
-            return 0;
-        } else {
-            // 字符串不同,释放内存
-            pthread_mutex_lock(&dynamicBlackListsMutex);
-            safeFree(&dynamicBlackLists[index]);
-            dynamicBlackLists_len[index] = 0;
-            pthread_mutex_unlock(&dynamicBlackListsMutex);
-        }
-    }
-
-    // 比较两个字符串,将2个文件名相同部分截取出来,并存储
-    for (unsigned short int i = 0;; i++) {
-        if (input_str[i] != dynamicBlackLists[10][i] || input_str[i] == '\0' || dynamicBlackLists[10][i] == '\0') {
-            diff_position = i;
-            break;
-        }
-    }
-
-    if (diff_position == 0) {
-        // 起始路径不同,遇到这种情况可以做特殊处理,目前没想好怎么处理,先拒绝好了
-        dynamicBlackLists_len[index] = strlen(input_str) / 2;
-        handleAddDynamicBlackLists(index, input_str);
-        sprintf(index_str, "%d", index);
-        writeLog(strmerge((const char *[]){"异常情况! 起始路径不同!\n", "input_str:", input_str, "\ndynamicBlackLists[10]:", dynamicBlackLists[10], "\ndynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
-        return 1;
-    }
-
-    dynamicBlackLists_len[index] = diff_position;
-    handleAddDynamicBlackLists(index, input_str);
-    //    if (isMemoryLeak) {}
-#ifdef DEBUG
-    sprintf(index_str, "%d", index);
-    writeLog(strmerge((const char *[]){"新增动态黑名单:\n", "dynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
-#endif
-    lastAccess_time = time(NULL);// 初始化上次访问时间
-
-    return 0;
-}
-
-// 判断字符串是否在动态黑名单中
-static unsigned short int isInDynamicBlackLists(const char *input_str) {
-    // 特殊规则处理
-    if (isJetBrainPath || endsWith(input_str, 1, "xlog")) {
-        return 0;
-    }
-
-    current_time = time(NULL);
-
-    for (size_t i = 0; i < ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1); ++i) {
-        if ((dynamicBlackLists[i] != NULL) && dynamicBlackLists_len[i] != 0 && memcmp(dynamicBlackLists[i], input_str, dynamicBlackLists_len[i]) == 0) { // 存在不相同内容
-            // 判断名单是否过期
-            if (current_time - lastAccess_time > TIME_LIMIT * 3) {
-                pthread_mutex_lock(&dynamicBlackListsMutex);
-                safeFree(&dynamicBlackLists[i]);
-                dynamicBlackLists_len[i] = 0;
-                pthread_mutex_unlock(&dynamicBlackListsMutex);
-            } else {
-                lastAccess_time = current_time;
-                return 1;// 字符串数组中包含目标字符串
-            }
-        }
-    }
-
-    unsigned short int index = hashFunction(input_str);
-
-    if (stringLists[index].str != NULL) {
-//        if (strcmp(stringLists[index].str, input_str) != 0) {
-        if (memcmp(stringLists[index].str, input_str, stringLists[index].len) != 0) {
-            // 不相同字符串,但相同index
-            // 注意此处可能会释放掉dynamicBlackLists[10]指向的内存块
-            pthread_mutex_lock(&stringListsMutex);
-            pthread_mutex_lock(&dynamicBlackListsMutex);
-            if (stringLists[index].str == dynamicBlackLists[10]) {
-                // 指向同一块内存
-                dynamicBlackLists[10] = NULL;
-            }
-            safeFree((char **) &stringLists[index]);
-            pthread_mutex_unlock(&dynamicBlackListsMutex);
-            pthread_mutex_unlock(&stringListsMutex);
-            goto FirstAccess;
-        }
-
-        if (current_time - stringLists[index].first_visit_time <= TIME_LIMIT) {
-            stringLists[index].visit_count++;
-            if (stringLists[index].visit_count >= MAX_VISIT_COUNT) {
-                // 添加到动态黑名单
-                AddDynamicBlackLists(index, input_str);
-                return 1;
-            }
-        } else {
-            stringLists[index].visit_count = 1;
-            stringLists[index].first_visit_time = current_time;
-        }
-
-        return 0;
-    } else {
-        // 首次访问
-    FirstAccess:
-        if (current_time - firstAccess_time <= TIME_LIMIT * 3) {
-            FirstAccessCount++;
-        } else {
-            FirstAccessCount = 1;
-        }
-
-        firstAccess_time = current_time;
-
-        if (FirstAccessCount >= MAX_VISIT_COUNT) {
-            // 添加到动态黑名单
-            AddDynamicBlackLists(index, input_str);
-            return 1;
-        }
-
-        stringLists[index].str = dynamicBlackLists[10] = strdup(input_str);
-        stringLists[index].len = strlen(input_str);
-        stringLists[index].visit_count = 1;
-        stringLists[index].first_visit_time = time(NULL);
-        return 0;
-    }
-}
+//static void handleAddDynamicBlackLists(unsigned short int index, const char *input_str) {
+//    dynamicBlackLists[index] = malloc((dynamicBlackLists_len[index] + 1 + 1) * sizeof(char));
+//    strncpy(dynamicBlackLists[index], input_str, dynamicBlackLists_len[index] + 1);
+//    dynamicBlackLists[index][dynamicBlackLists_len[index] + 1] = '\0';
+//}
+//static unsigned short int AddDynamicBlackLists(unsigned short int index, const char *input_str) {
+//    FirstAccessCount = 0;// 重置访问次数
+//
+//    if (dynamicBlackLists[10] == NULL) {
+//        // 异常情况:dynamicBlackLists[10]为空
+//        // 试图截取字符串前1/2长度作为黑名单路径特征
+//        dynamicBlackLists_len[index] = strlen(input_str) / 2;
+//        handleAddDynamicBlackLists(index, input_str);
+//        sprintf(index_str, "%d", index);
+//        writeLog(strmerge((const char *[]){"异常情况! dynamicBlackLists[10]为空!\n", "input_str:", input_str, "\ndynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
+//        return 1;
+//    }
+//
+//    if (dynamicBlackLists[index] != NULL) {
+//        //        if (strncmp(dynamicBlackLists[index], input_str, strlen(dynamicBlackLists[index])) == 0) {
+//        if (dynamicBlackLists_len[index] != 0 && memcmp(dynamicBlackLists[index], input_str, dynamicBlackLists_len[index]) == 0) {
+//            // 字符串相同,更新上次访问时间
+//            lastAccess_time = time(NULL);
+//            return 0;
+//        } else {
+//            // 字符串不同,释放内存
+//            pthread_mutex_lock(&dynamicBlackListsMutex);
+//            safeFree(&dynamicBlackLists[index]);
+//            dynamicBlackLists_len[index] = 0;
+//            pthread_mutex_unlock(&dynamicBlackListsMutex);
+//        }
+//    }
+//
+//    // 比较两个字符串,将2个文件名相同部分截取出来,并存储
+//    for (unsigned short int i = 0;; i++) {
+//        if (input_str[i] != dynamicBlackLists[10][i] || input_str[i] == '\0' || dynamicBlackLists[10][i] == '\0') {
+//            diff_position = i;
+//            break;
+//        }
+//    }
+//
+//    if (diff_position < 3) {
+//        // 起始路径不同,遇到这种情况可以做特殊处理,目前没想好怎么处理,先拒绝好了
+//        dynamicBlackLists_len[index] = strlen(input_str) / 2;
+//        handleAddDynamicBlackLists(index, input_str);
+//        sprintf(index_str, "%d", index);
+//#ifdef DEBUG
+//        writeLog(strmerge((const char *[]){"异常情况! 起始路径不同!\n", "input_str:", input_str, "\ndynamicBlackLists[10]:", dynamicBlackLists[10], "\ndynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
+//#endif
+//        return 1;
+//    }
+//
+//    dynamicBlackLists_len[index] = diff_position;
+//    handleAddDynamicBlackLists(index, input_str);
+//    //    if (isMemoryLeak) {}
+//#ifdef DEBUG
+//    sprintf(index_str, "%d", index);
+//    writeLog(strmerge((const char *[]){"新增动态黑名单:\n", "dynamicBlackLists[", index_str, "]:", dynamicBlackLists[index], NULL}));
+//#endif
+//    lastAccess_time = time(NULL);// 初始化上次访问时间
+//
+//    return 0;
+//}
+//
+//// 判断字符串是否在动态黑名单中
+//static unsigned short int isInDynamicBlackLists(const char *input_str) {
+//    // 特殊规则处理
+////    if (endsWith(input_str, 1, "xlog")) {
+////        return 0;
+////    }
+//
+//    current_time = time(NULL);
+//
+//    for (size_t i = 0; i < ((sizeof(dynamicBlackLists) / sizeof(dynamicBlackLists[0])) - 1); ++i) {
+//        if ((dynamicBlackLists[i] != NULL) && dynamicBlackLists_len[i] != 0 && memcmp(dynamicBlackLists[i], input_str, dynamicBlackLists_len[i]) == 0) { // 存在不相同内容
+//            // 判断名单是否过期
+//            if (current_time - lastAccess_time > TIME_LIMIT * 3) {
+//                pthread_mutex_lock(&dynamicBlackListsMutex);
+//                safeFree(&dynamicBlackLists[i]);
+//                dynamicBlackLists_len[i] = 0;
+//                pthread_mutex_unlock(&dynamicBlackListsMutex);
+//            } else {
+//                lastAccess_time = current_time;
+//                return 1;// 字符串数组中包含目标字符串
+//            }
+//        }
+//    }
+//
+//    unsigned short int index = hashFunction(input_str);
+//
+//    if (stringLists[index].str != NULL) {
+////        if (strcmp(stringLists[index].str, input_str) != 0) {
+//        if (memcmp(stringLists[index].str, input_str, stringLists[index].len) != 0) {
+//            // 不相同字符串,但相同index
+//            // 注意此处可能会释放掉dynamicBlackLists[10]指向的内存块
+//            pthread_mutex_lock(&stringListsMutex);
+//            pthread_mutex_lock(&dynamicBlackListsMutex);
+//            if (stringLists[index].str == dynamicBlackLists[10]) {
+//                // 指向同一块内存
+//                dynamicBlackLists[10] = NULL;
+//            }
+//            safeFree((char **) &stringLists[index]);
+//            pthread_mutex_unlock(&dynamicBlackListsMutex);
+//            pthread_mutex_unlock(&stringListsMutex);
+//            goto FirstAccess;
+//        }
+//
+//        if (current_time - stringLists[index].first_visit_time <= TIME_LIMIT) {
+//            stringLists[index].visit_count++;
+//            if (stringLists[index].visit_count >= MAX_VISIT_COUNT) {
+//                // 添加到动态黑名单
+//                AddDynamicBlackLists(index, input_str);
+//                return 1;
+//            }
+//        } else {
+//            stringLists[index].visit_count = 1;
+//            stringLists[index].first_visit_time = current_time;
+//        }
+//
+//        return 0;
+//    } else {
+//        // 首次访问
+//    FirstAccess:
+//        if (current_time - firstAccess_time <= TIME_LIMIT * 3) {
+//            FirstAccessCount++;
+//        } else {
+//            FirstAccessCount = 1;
+//        }
+//
+//        firstAccess_time = current_time;
+//
+//        stringLists[index].str = dynamicBlackLists[10] = strdup(input_str);
+//        stringLists[index].len = strlen(input_str);
+//        stringLists[index].visit_count = 1;
+//        stringLists[index].first_visit_time = time(NULL);
+//
+//        if (FirstAccessCount >= MAX_VISIT_COUNT) {
+//            // 添加到动态黑名单
+//            AddDynamicBlackLists(index, input_str);
+//            return 1;
+//        }
+//        return 0;
+//    }
+//}
 
 // 字符串前缀匹配函数
 // unsigned short int startsWith(const char *str, const char *prefix) {
@@ -396,34 +398,34 @@ static unsigned short int arrayIncludes(const char *array[], size_t size,
 }
 
 // 判断字符串是否以指定后缀结尾
-static unsigned short int endsWith(const char *str, int num_suffix, ...) {
-    size_t str_len = strlen(str);
-    va_list suffix_list;
-    va_start(suffix_list, num_suffix);
-
-    for (int i = 0; i < num_suffix; i++) {
-        const char *suffix = va_arg(suffix_list, const char *);
-        size_t suffix_len = strlen(suffix);
-
-        // 确保字符串长度大于后缀长度，否则无法以后缀结尾
-        if (str_len < suffix_len) {
-            va_end(suffix_list);
-            return 0;
-        }
-
-        // 使用指针遍历
-        const char *end_of_str = str + (str_len - suffix_len);
-        while (*suffix != '\0') {
-            if (*end_of_str++ != *suffix++) {
-                va_end(suffix_list);
-                return 0;// 字符不匹配，不是以后缀结尾
-            }
-        }
-    }
-
-    va_end(suffix_list);
-    return 1;// 字符匹配，以后缀结尾
-}
+//static unsigned short int endsWith(const char *str, int num_suffix, ...) {
+//    size_t str_len = strlen(str);
+//    va_list suffix_list;
+//    va_start(suffix_list, num_suffix);
+//
+//    for (int i = 0; i < num_suffix; i++) {
+//        const char *suffix = va_arg(suffix_list, const char *);
+//        size_t suffix_len = strlen(suffix);
+//
+//        // 确保字符串长度大于后缀长度，否则无法以后缀结尾
+//        if (str_len < suffix_len) {
+//            va_end(suffix_list);
+//            return 0;
+//        }
+//
+//        // 使用指针遍历
+//        const char *end_of_str = str + (str_len - suffix_len);
+//        while (*suffix != '\0') {
+//            if (*end_of_str++ != *suffix++) {
+//                va_end(suffix_list);
+//                return 0;// 字符不匹配，不是以后缀结尾
+//            }
+//        }
+//    }
+//
+//    va_end(suffix_list);
+//    return 1;// 字符匹配，以后缀结尾
+//}
 
 // 文件名判定规则
 static unsigned short int rule_filename(const char *path) {
@@ -462,12 +464,15 @@ static unsigned short int is_directory(const char *path) {
                 (isJetBrainPath && ((suffix[-4] == 'c') && (suffix[-3] == 's') &&
                                     (suffix[-2] == 'v')))) {// 匹配JB中.csv.0 文件
                 // 针对jetbrains的文件进行特殊处理
-                if (isJetBrainPath && !endsWith(filename, 2, ".log", ".txt")) {
-                    filename++;// 移动到文件名的第一个字符
-                    if (!pathExists(filename)) {
-                        // 哈希环中不存在该文件名
-                        writePath(filename);
-                        isfileAccessed = false;
+                //  !endsWith(filename, 2, ".log", ".txt")
+                if (isJetBrainPath) {
+                    if (memcmp(suffix, "log", 3) == 0 || memcmp(suffix, "txt", 3) == 0) {
+                        filename++;// 移动到文件名的第一个字符
+                        if (!pathExists(filename)) {
+                            // 哈希环中不存在该文件名
+                            writePath(filename);
+                            isfileAccessed = false;
+                        }
                     }
                 }
                 return 0;
@@ -578,6 +583,7 @@ static void handle_sigterm(int signum) {
     if (signum == SIGTERM) {
         //        printf("Received SIGTERM signal. Performing cleanup...\n");
 //        writeLog(strmerge((const char *[]){"Received SIGTERM signal. Performing cleanup...\n", "退出时间: ", time_str, NULL}));
+        fclose(debug_fp);
         execute_command(strmerge((const char *[]){"umount ", point_path, NULL}));
         exit(EXIT_SUCCESS);
     } else if (signum == SIGUSR1) {
@@ -588,6 +594,7 @@ static void handle_sigterm(int signum) {
         fprintf(debug_fp, "退出时间: %s\n", time_str);
         isMemoryLeak = true;
     } else if (signum == SIGSEGV || signum == SIGABRT) {
+        fclose(debug_fp);
         // 进程崩溃,重启进程
         writeLog(strmerge((const char *[]){"主进程崩溃! 开始重启!\n", "崩溃时间: ", time_str, NULL}));
         const pid_t pid_ = fork();
@@ -659,9 +666,12 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
     const char *path_plus = path + 1;
     if (*path_plus) {
         if (blackMode) {
-            if ((*path_plus == '.') ||
+            if (
+//                    (*path_plus == '.') ||
                 //                            arrayIncludes(blacklists, blacklists_size, (path + 1)) ||
-                rule_filename(path_plus)) {
+                    rule_filename(path_plus) //||
+//                    isInDynamicBlackLists(path_plus)
+                    ) {
                 return -ENOENT;
             }
         } else {
@@ -678,8 +688,9 @@ static int xmp_getattr(const char *path, struct stat *stbuf) {
             fprintf(debug_fp, "xmp_getattr 伪装为文件夹\n");
         }
     } else {
-        if (!isfileAccessed ||
-            isInDynamicBlackLists(path_plus)) {
+        if (
+                (isJetBrainPath && !isfileAccessed)
+                ) {
             // 初次访问文件，返回文件不存在
             isfileAccessed = true;// 重置文件访问标志
             return -ENOENT;
